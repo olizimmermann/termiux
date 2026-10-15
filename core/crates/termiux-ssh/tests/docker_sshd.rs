@@ -54,8 +54,13 @@ async fn run_echo(session: &SshSession) -> String {
 #[tokio::test]
 #[ignore = "needs docker sshd"]
 async fn password_auth_shell() {
-    let session =
-        SshSession::connect(&test_host(), Credential::Password("termiux".into()), Arc::new(AcceptAll)).await.unwrap();
+    let session = SshSession::connect(
+        &test_host(),
+        Credential::Password { password: "termiux".into(), fallback: None },
+        Arc::new(AcceptAll),
+    )
+    .await
+    .unwrap();
     let out = run_echo(&session).await;
     assert!(out.contains("termiux-42"), "{out}");
     assert!(out.contains("40 120"), "resize not applied: {out}");
@@ -77,13 +82,23 @@ async fn key_auth_shell() {
 #[tokio::test]
 #[ignore = "needs docker sshd"]
 async fn wrong_password_rejected() {
-    let err = SshSession::connect(&test_host(), Credential::Password("nope".into()), Arc::new(AcceptAll)).await;
+    let err = SshSession::connect(
+        &test_host(),
+        Credential::Password { password: "nope".into(), fallback: None },
+        Arc::new(AcceptAll),
+    )
+    .await;
     assert!(matches!(err, Err(SshError::AuthRejected)));
 }
 
 #[tokio::test]
 #[ignore = "needs docker sshd"]
 async fn untrusted_host_key_rejected() {
-    let err = SshSession::connect(&test_host(), Credential::Password("termiux".into()), Arc::new(RejectAll)).await;
+    let err = SshSession::connect(
+        &test_host(),
+        Credential::Password { password: "termiux".into(), fallback: None },
+        Arc::new(RejectAll),
+    )
+    .await;
     assert!(matches!(err, Err(SshError::HostKey(HostKeyError::NotTrusted { .. }))));
 }

@@ -112,9 +112,12 @@ async fn password_falls_back_to_keyboard_interactive() {
     let port = spawn_server(HOST_KEY_A, false).await;
     let store = Arc::new(Store::open_in_memory().unwrap());
     let (v, _) = verifier(&store, true);
-    SshSession::connect(&host(port), Credential::Password(PASSWORD.into()), v.clone()).await.unwrap();
+    SshSession::connect(&host(port), Credential::Password { password: PASSWORD.into(), fallback: None }, v.clone())
+        .await
+        .unwrap();
 
-    let wrong = SshSession::connect(&host(port), Credential::Password("nope".into()), v).await;
+    let wrong =
+        SshSession::connect(&host(port), Credential::Password { password: "nope".into(), fallback: None }, v).await;
     assert!(matches!(wrong, Err(SshError::AuthRejected)));
 }
 
@@ -142,6 +145,22 @@ async fn keyboard_interactive_multi_round() {
     assert_eq!(responder.0.load(Ordering::SeqCst), 2, "password + OTP rounds");
 }
 
+#[tokio::test]
+async fn stored_password_then_otp_uses_fallback() {
+    let port = spawn_server(HOST_KEY_A, true).await;
+    let store = Arc::new(Store::open_in_memory().unwrap());
+    let (v, _) = verifier(&store, true);
+    let fallback = Arc::new(OtpResponder(AtomicUsize::new(0)));
+    let credential = Credential::Password { password: PASSWORD.into(), fallback: Some(fallback.clone()) };
+    SshSession::connect(&host(port), credential, v.clone()).await.unwrap();
+    assert_eq!(fallback.0.load(Ordering::SeqCst), 1, "only the OTP round reaches the user");
+
+    // Without a fallback the OTP round cannot be answered.
+    let credential = Credential::Password { password: PASSWORD.into(), fallback: None };
+    let result = SshSession::connect(&host(port), credential, v).await;
+    assert!(matches!(result, Err(SshError::AuthRejected)));
+}
+
 struct Cancel;
 impl KeyboardInteractiveResponder for Cancel {
     fn respond(&self, _: &str, _: &str, _: &[(String, bool)]) -> Option<Vec<String>> {
@@ -165,28 +184,35 @@ async fn known_hosts_trust_on_first_use_then_detect_change() {
 
     // Declined prompt: nothing stored, connection refused.
     let (v, prompt) = verifier(&store, false);
-    let refused = SshSession::connect(&host(port), Credential::Password(PASSWORD.into()), v).await;
+    let refused =
+        SshSession::connect(&host(port), Credential::Password { password: PASSWORD.into(), fallback: None }, v).await;
     assert!(matches!(refused, Err(SshError::HostKey(HostKeyError::NotTrusted { .. }))));
     assert_eq!(prompt.seen.lock().unwrap().len(), 1);
     assert!(store.known_host_keys("127.0.0.1", port).unwrap().is_empty());
 
     // Accepted prompt: key stored with the fingerprint the user saw.
     let (v, prompt) = verifier(&store, true);
-    SshSession::connect(&host(port), Credential::Password(PASSWORD.into()), v.clone()).await.unwrap();
+    SshSession::connect(&host(port), Credential::Password { password: PASSWORD.into(), fallback: None }, v.clone())
+        .await
+        .unwrap();
     let seen = prompt.seen.lock().unwrap()[0].clone();
     let expected = PrivateKey::from_openssh(HOST_KEY_A).unwrap().public_key().fingerprint(Default::default());
     assert_eq!(seen.fingerprint, expected.to_string());
     assert_eq!(seen.algorithm, "ssh-ed25519");
 
     // Second connection: trusted silently.
-    SshSession::connect(&host(port), Credential::Password(PASSWORD.into()), v.clone()).await.unwrap();
+    SshSession::connect(&host(port), Credential::Password { password: PASSWORD.into(), fallback: None }, v.clone())
+        .await
+        .unwrap();
     assert_eq!(prompt.seen.lock().unwrap().len(), 1);
 
     // Same address now presents a different key: hard failure, no prompt.
     let impostor = spawn_server(HOST_KEY_B, false).await;
     let fp_a = store.known_host_keys("127.0.0.1", port).unwrap()[0].clone();
     store.trust_host_key("127.0.0.1", impostor, &fp_a).unwrap();
-    let mitm = SshSession::connect(&host(impostor), Credential::Password(PASSWORD.into()), v).await;
+    let mitm =
+        SshSession::connect(&host(impostor), Credential::Password { password: PASSWORD.into(), fallback: None }, v)
+            .await;
     match mitm {
         Err(SshError::HostKey(HostKeyError::Changed { previous_fingerprint, .. })) => {
             assert_eq!(previous_fingerprint, fp_a.fingerprint)

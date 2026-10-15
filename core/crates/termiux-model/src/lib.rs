@@ -165,3 +165,21 @@ pub enum HostKeyStatus {
         previous_fingerprint: String,
     },
 }
+
+/// Why a terminal session ended; decides whether the UI offers "Reconnect".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EndReason {
+    /// The remote shell or local process exited normally.
+    Exited,
+    /// The transport died (network change, sleep, keepalive timeout).
+    ConnectionLost,
+    /// The user closed the session.
+    UserClosed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionEnd {
+    pub exit_status: Option<u32>,
+    pub reason: EndReason,
+}

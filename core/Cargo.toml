@@ -14,6 +14,7 @@ termiux-ssh = { path = "crates/termiux-ssh" }
 termiux-fido = { path = "crates/termiux-fido" }
 termiux-store = { path = "crates/termiux-store" }
 termiux-pty = { path = "crates/termiux-pty" }
+termiux-session = { path = "crates/termiux-session" }
 
 russh = { version = "0.64", default-features = false, features = ["flate2", "ring", "rsa"] }
 tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util"] }

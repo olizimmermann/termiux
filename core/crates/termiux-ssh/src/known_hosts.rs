@@ -30,6 +30,13 @@ pub struct KnownHostsVerifier {
 }
 
 impl HostKeyVerifier for KnownHostsVerifier {
+    fn known_key_types(&self, host: &str, port: u16) -> Vec<String> {
+        self.store
+            .known_host_keys(host, port)
+            .map(|keys| keys.into_iter().map(|k| k.algorithm).collect())
+            .unwrap_or_default()
+    }
+
     fn verify(&self, host: &str, port: u16, key: &PublicKey) -> Result<(), HostKeyError> {
         let internal = |e: &dyn std::fmt::Display| HostKeyError::Internal(e.to_string());
         let fingerprint = key.fingerprint(HashAlg::Sha256).to_string();

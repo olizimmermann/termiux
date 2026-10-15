@@ -2449,6 +2449,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "termiux-session"
+version = "0.1.0"
+dependencies = [
+ "russh",
+ "termiux-fido",
+ "termiux-model",
+ "termiux-pty",
+ "termiux-ssh",
+ "termiux-store",
+ "thiserror 2.0.21",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "termiux-ssh"
 version = "0.1.0"
 dependencies = [
