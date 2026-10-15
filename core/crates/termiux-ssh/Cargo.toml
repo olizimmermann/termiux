@@ -1,0 +1,15 @@
+[package]
+name = "termiux-ssh"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+termiux-model.workspace = true
+russh.workspace = true
+tokio.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+uuid.workspace = true

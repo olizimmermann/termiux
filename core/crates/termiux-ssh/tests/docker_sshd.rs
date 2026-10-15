@@ -1,0 +1,83 @@
+//! Integration tests against a local OpenSSH server. Run with `scripts/test-sshd.sh`,
+//! which starts the container and sets TERMIUX_TEST_KEY.
+
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use russh::keys::PublicKey;
+use termiux_model::{AuthMethod, Host};
+use termiux_ssh::{Credential, HostKeyVerifier, SshError, SshSession};
+use tokio::sync::oneshot;
+
+struct AcceptAll;
+impl HostKeyVerifier for AcceptAll {
+    fn verify(&self, _: &str, _: u16, _: &PublicKey) -> bool {
+        true
+    }
+}
+
+struct RejectAll;
+impl HostKeyVerifier for RejectAll {
+    fn verify(&self, _: &str, _: u16, _: &PublicKey) -> bool {
+        false
+    }
+}
+
+fn test_host() -> Host {
+    let mut host = Host::new("docker", "127.0.0.1", "termiux");
+    host.port = 2222;
+    host
+}
+
+async fn run_echo(session: &SshSession) -> String {
+    let output = Arc::new(Mutex::new(Vec::new()));
+    let sink = output.clone();
+    let (done_tx, done_rx) = oneshot::channel();
+    let shell = session
+        .open_shell("xterm-256color", 80, 24, move |b| sink.lock().unwrap().extend_from_slice(b), move |_| {
+            let _ = done_tx.send(());
+        })
+        .await
+        .unwrap();
+    shell.resize(120, 40);
+    shell.write(b"stty size; echo termiux-$((40+2)); exit\n");
+    tokio::time::timeout(Duration::from_secs(10), done_rx).await.unwrap().unwrap();
+    String::from_utf8_lossy(&output.lock().unwrap()).into_owned()
+}
+
+#[tokio::test]
+#[ignore = "needs docker sshd"]
+async fn password_auth_shell() {
+    let session = SshSession::connect(&test_host(), Credential::Password("termiux".into()), Arc::new(AcceptAll))
+        .await
+        .unwrap();
+    let out = run_echo(&session).await;
+    assert!(out.contains("termiux-42"), "{out}");
+    assert!(out.contains("40 120"), "resize not applied: {out}");
+}
+
+#[tokio::test]
+#[ignore = "needs docker sshd"]
+async fn key_auth_shell() {
+    let key = std::fs::read_to_string(std::env::var("TERMIUX_TEST_KEY").unwrap()).unwrap();
+    let mut host = test_host();
+    host.auth = AuthMethod::Key { key_id: uuid::Uuid::nil() };
+    let session = SshSession::connect(&host, Credential::PrivateKey { openssh: key, passphrase: None }, Arc::new(AcceptAll))
+        .await
+        .unwrap();
+    assert!(run_echo(&session).await.contains("termiux-42"));
+}
+
+#[tokio::test]
+#[ignore = "needs docker sshd"]
+async fn wrong_password_rejected() {
+    let err = SshSession::connect(&test_host(), Credential::Password("nope".into()), Arc::new(AcceptAll)).await;
+    assert!(matches!(err, Err(SshError::AuthRejected)));
+}
+
+#[tokio::test]
+#[ignore = "needs docker sshd"]
+async fn untrusted_host_key_rejected() {
+    let err = SshSession::connect(&test_host(), Credential::Password("termiux".into()), Arc::new(RejectAll)).await;
+    assert!(err.is_err());
+}

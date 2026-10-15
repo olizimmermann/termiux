@@ -1,0 +1,31 @@
+name: Termiux
+options:
+  bundleIdPrefix: com.ozimmermann
+  deploymentTarget:
+    macOS: "14.0"
+  createIntermediateGroups: true
+packages:
+  TermiuxCore:
+    path: Packages/TermiuxCore
+  SwiftTerm:
+    url: https://github.com/migueldeicaza/SwiftTerm
+    from: 1.20.0
+targets:
+  Termiux:
+    type: application
+    platform: macOS
+    sources: [Termiux/Sources, Termiux/Resources]
+    dependencies:
+      - package: TermiuxCore
+      - package: SwiftTerm
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.ozimmermann.termiux
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        SWIFT_VERSION: "6.0"
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: Termiux
+        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.developer-tools
+        CODE_SIGN_IDENTITY: "-"
+        ENABLE_HARDENED_RUNTIME: YES

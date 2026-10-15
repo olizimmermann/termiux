@@ -1,0 +1,19 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/olizimmermann/termiux"
+
+[workspace.dependencies]
+termiux-model = { path = "crates/termiux-model" }
+termiux-ssh = { path = "crates/termiux-ssh" }
+russh = { version = "0.64", default-features = false, features = ["flate2", "ring", "rsa"] }
+tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util"] }
+serde = { version = "1.0", features = ["derive"] }
+uuid = { version = "1.28", features = ["v4", "serde"] }
+thiserror = "2.0"
+uniffi = "0.32"

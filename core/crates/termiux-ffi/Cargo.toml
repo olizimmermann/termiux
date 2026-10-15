@@ -1,0 +1,21 @@
+[package]
+name = "termiux-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["lib", "staticlib"]
+name = "termiux_ffi"
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "uniffi-bindgen.rs"
+
+[dependencies]
+termiux-model.workspace = true
+termiux-ssh.workspace = true
+tokio.workspace = true
+thiserror.workspace = true
+uniffi = { workspace = true, features = ["cli", "tokio"] }
+russh.workspace = true

@@ -1,0 +1,8 @@
+/core/target/
+/apple/build/
+/apple/Packages/TermiuxCore/*.xcframework
+/apple/Packages/TermiuxCore/Sources/TermiuxCore/termiux_ffi.swift
+xcuserdata/
+DerivedData/
+.DS_Store
+/apple/Termiux.xcodeproj/
