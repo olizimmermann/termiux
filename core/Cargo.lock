@@ -2413,12 +2413,16 @@ dependencies = [
 name = "termiux-ffi"
 version = "0.1.0"
 dependencies = [
- "russh",
+ "tempfile",
  "termiux-model",
+ "termiux-pty",
+ "termiux-session",
  "termiux-ssh",
+ "termiux-store",
  "thiserror 2.0.21",
  "tokio",
  "uniffi",
+ "uuid",
 ]
 
 [[package]]

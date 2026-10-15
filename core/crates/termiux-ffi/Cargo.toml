@@ -15,7 +15,13 @@ path = "uniffi-bindgen.rs"
 [dependencies]
 termiux-model.workspace = true
 termiux-ssh.workspace = true
+termiux-store.workspace = true
+termiux-session.workspace = true
+termiux-pty.workspace = true
+uuid.workspace = true
 tokio.workspace = true
 thiserror.workspace = true
 uniffi = { workspace = true, features = ["cli", "tokio"] }
-russh.workspace = true
+
+[dev-dependencies]
+tempfile = "3.27"
