@@ -17,6 +17,8 @@ pub enum SshError {
     Key(#[from] russh::keys::Error),
     #[error("authentication rejected")]
     AuthRejected,
+    #[error(transparent)]
+    SecurityKey(#[from] termiux_fido::SkAuthError),
     #[error("host key rejected for {host}: {fingerprint}")]
     HostKeyRejected { host: String, fingerprint: String },
 }
@@ -25,6 +27,8 @@ pub enum SshError {
 pub enum Credential {
     Password(String),
     PrivateKey { openssh: String, passphrase: Option<String> },
+    /// FIDO2 key on a hardware authenticator; signing needs a touch (and the PIN if set).
+    SecurityKey { key: termiux_fido::SkKey, pin: Option<String> },
 }
 
 /// Decides whether a server's host key is trusted (known_hosts / TOFU prompt).
@@ -91,6 +95,13 @@ impl SshSession {
                 let hash = handle.best_supported_rsa_hash().await?.flatten();
                 let key = PrivateKeyWithHashAlg::new(Arc::new(key), hash);
                 handle.authenticate_publickey(&host.username, key).await?
+            }
+            Credential::SecurityKey { key, pin } => {
+                let public = key.public_key.clone();
+                let mut signer = termiux_fido::SkSigner { key, pin };
+                handle
+                    .authenticate_publickey_with(&host.username, public, None, &mut signer)
+                    .await?
             }
         };
         if !auth.success() {

@@ -6,10 +6,12 @@ license.workspace = true
 
 [dependencies]
 termiux-model.workspace = true
+termiux-fido.workspace = true
 russh.workspace = true
 tokio.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+rpassword = "7.5.4"
 uuid.workspace = true

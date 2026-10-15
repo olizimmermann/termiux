@@ -1,0 +1,12 @@
+[package]
+name = "termiux-fido"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ctap-hid-fido2 = "3.6"
+russh.workspace = true
+tokio.workspace = true
+thiserror.workspace = true
+getrandom = "0.4"
