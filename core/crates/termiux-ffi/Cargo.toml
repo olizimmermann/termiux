@@ -18,6 +18,7 @@ termiux-ssh.workspace = true
 termiux-store.workspace = true
 termiux-session.workspace = true
 termiux-pty.workspace = true
+termiux-theme.workspace = true
 uuid.workspace = true
 tokio.workspace = true
 thiserror.workspace = true

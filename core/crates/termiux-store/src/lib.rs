@@ -11,7 +11,7 @@ use std::sync::Mutex;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use termiux_model::{Group, Host, HostKeyStatus, Key, now};
+use termiux_model::{Group, Host, HostKeyStatus, Key, Theme, now};
 use uuid::Uuid;
 
 pub use secrets::{MemorySecretStore, SecretError, SecretStore};
@@ -43,6 +43,8 @@ const MIGRATIONS: &[&str] = &[
          added_at INTEGER NOT NULL,
          PRIMARY KEY (host, port, algorithm)
      );",
+    // 2: user themes
+    "CREATE TABLE themes (id TEXT PRIMARY KEY, label TEXT NOT NULL, data TEXT NOT NULL, updated_at INTEGER NOT NULL);",
 ];
 
 /// A record kind stored in its own table as JSON.
@@ -73,6 +75,7 @@ macro_rules! record {
 record!(Host, "hosts", label);
 record!(Group, "groups", name);
 record!(Key, "keys", label);
+record!(Theme, "themes", name);
 
 /// A host key as recorded in known_hosts.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -185,6 +188,16 @@ impl Store {
         self.delete::<Key>(id)
     }
 
+    pub fn save_theme(&self, theme: &Theme) -> Result<()> {
+        self.put(theme)
+    }
+    pub fn themes(&self) -> Result<Vec<Theme>> {
+        self.list()
+    }
+    pub fn delete_theme(&self, id: Uuid) -> Result<bool> {
+        self.delete::<Theme>(id)
+    }
+
     /// Checks a presented server key against known_hosts. Any recorded key for the same
     /// host:port that does not match counts as changed, regardless of algorithm, so a
     /// server (or attacker) cannot dodge the warning by offering a different key type.
@@ -287,6 +300,28 @@ mod tests {
 
         store.forget_host("h", 22).unwrap();
         assert_eq!(store.check_host_key("h", 22, &swapped).unwrap(), HostKeyStatus::Unknown);
+    }
+
+    #[test]
+    fn migrates_existing_v1_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("old.db");
+        let host = Host::new("kept", "h", "u");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(MIGRATIONS[0]).unwrap();
+            conn.pragma_update(None, "user_version", 1).unwrap();
+            conn.execute(
+                "INSERT INTO hosts (id, label, data, updated_at) VALUES (?1, ?2, ?3, 0)",
+                params![host.id.to_string(), host.label, serde_json::to_string(&host).unwrap()],
+            )
+            .unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.hosts().unwrap(), vec![host]);
+        assert!(store.themes().unwrap().is_empty());
+        let version: i64 = store.conn().pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
+        assert_eq!(version, MIGRATIONS.len() as i64);
     }
 
     #[test]

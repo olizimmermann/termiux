@@ -183,3 +183,23 @@ pub struct SessionEnd {
     pub exit_status: Option<u32>,
     pub reason: EndReason,
 }
+
+/// Terminal colour scheme. Colours are `#rrggbb`. Fonts and cursor style are per-device
+/// appearance settings, not part of a theme (fonts differ between machines).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Theme {
+    pub id: Uuid,
+    pub name: String,
+    pub foreground: String,
+    pub background: String,
+    pub cursor: String,
+    pub cursor_text: Option<String>,
+    pub selection_background: String,
+    pub selection_foreground: Option<String>,
+    /// ANSI colours 0–15.
+    pub palette: Vec<String>,
+    /// Built-in presets ship with the app and cannot be edited or deleted.
+    #[serde(default)]
+    pub builtin: bool,
+    pub updated_at: Timestamp,
+}

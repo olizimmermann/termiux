@@ -27,6 +27,8 @@ pub enum CoreError {
     #[error("{message}")]
     InvalidKey { message: String },
     #[error("{message}")]
+    InvalidTheme { message: String },
+    #[error("{message}")]
     Unsupported { message: String },
     #[error("{message}")]
     Failed { message: String },
@@ -224,6 +226,8 @@ pub struct HostRecord {
     pub keepalive_secs: u32,
     pub term: String,
     pub startup_command: Option<String>,
+    /// `None` uses the app's default theme.
+    pub theme_id: Option<String>,
 }
 
 impl From<&model::Host> for HostRecord {
@@ -244,8 +248,47 @@ impl From<&model::Host> for HostRecord {
             keepalive_secs: h.keepalive_secs,
             term: h.term.clone(),
             startup_command: h.startup_command.clone(),
+            theme_id: h.theme_id.map(|t| t.to_string()),
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct ThemeRecord {
+    pub id: String,
+    pub name: String,
+    pub foreground: String,
+    pub background: String,
+    pub cursor: String,
+    pub cursor_text: Option<String>,
+    pub selection_background: String,
+    pub selection_foreground: Option<String>,
+    /// 16 ANSI colours, `#rrggbb`.
+    pub palette: Vec<String>,
+    pub builtin: bool,
+}
+
+impl From<&model::Theme> for ThemeRecord {
+    fn from(t: &model::Theme) -> Self {
+        Self {
+            id: t.id.to_string(),
+            name: t.name.clone(),
+            foreground: t.foreground.clone(),
+            background: t.background.clone(),
+            cursor: t.cursor.clone(),
+            cursor_text: t.cursor_text.clone(),
+            selection_background: t.selection_background.clone(),
+            selection_foreground: t.selection_foreground.clone(),
+            palette: t.palette.clone(),
+            builtin: t.builtin,
+        }
+    }
+}
+
+/// Id of the theme used when neither the host nor the user picked one.
+#[uniffi::export]
+pub fn default_theme_id() -> String {
+    termiux_theme::default_theme_id().to_string()
 }
 
 /// How to treat the stored password when saving a host.
@@ -332,6 +375,7 @@ impl TermiuxCore {
         host.keepalive_secs = record.keepalive_secs;
         host.term = if record.term.is_empty() { "xterm-256color".into() } else { record.term };
         host.startup_command = record.startup_command.filter(|c| !c.trim().is_empty());
+        host.theme_id = record.theme_id.as_deref().map(parse_id).transpose()?;
         host.updated_at = model::now();
 
         let old_secret = match &host.auth {
@@ -390,6 +434,33 @@ impl TermiuxCore {
 
     pub fn delete_key(&self, id: String) -> Result<(), CoreError> {
         Ok(self.core.delete_key(parse_id(&id)?)?)
+    }
+
+    /// Built-in themes followed by the user's own, each group sorted by name.
+    pub fn themes(&self) -> Result<Vec<ThemeRecord>, CoreError> {
+        let builtin = termiux_theme::builtin_themes();
+        let user = self.core.store.themes()?;
+        Ok(builtin.iter().chain(user.iter()).map(ThemeRecord::from).collect())
+    }
+
+    /// Imports an iTerm2 `.itermcolors` or Ghostty theme file.
+    pub fn import_theme(&self, name: String, contents: Vec<u8>) -> Result<ThemeRecord, CoreError> {
+        let theme =
+            termiux_theme::import(&name, &contents).map_err(|e| CoreError::InvalidTheme { message: e.to_string() })?;
+        self.core.store.save_theme(&theme)?;
+        Ok(ThemeRecord::from(&theme))
+    }
+
+    /// Deletes a user theme. Hosts using it fall back to the default theme.
+    pub fn delete_theme(&self, id: String) -> Result<(), CoreError> {
+        let id = parse_id(&id)?;
+        self.core.store.delete_theme(id)?;
+        for mut host in self.core.store.hosts()?.into_iter().filter(|h| h.theme_id == Some(id)) {
+            host.theme_id = None;
+            host.updated_at = model::now();
+            self.core.store.save_host(&host)?;
+        }
+        Ok(())
     }
 
     /// Forgets the recorded host key, e.g. after the user confirmed a legitimate change.
@@ -491,6 +562,7 @@ mod tests {
             keepalive_secs: 30,
             term: String::new(),
             startup_command: Some("  ".into()),
+            theme_id: None,
         }
     }
 
