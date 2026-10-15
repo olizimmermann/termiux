@@ -4,7 +4,7 @@ use std::sync::{Arc, OnceLock};
 
 use russh::keys::{HashAlg, PublicKey};
 use termiux_model::Host;
-use termiux_ssh::{Credential, HostKeyVerifier, Shell, SshSession};
+use termiux_ssh::{Credential, HostKeyError, HostKeyVerifier, Shell, SshSession};
 
 uniffi::setup_scaffolding!();
 
@@ -41,13 +41,13 @@ pub trait HostKeyPrompt: Send + Sync {
 struct PromptVerifier(Arc<dyn HostKeyPrompt>);
 
 impl HostKeyVerifier for PromptVerifier {
-    fn verify(&self, host: &str, port: u16, key: &PublicKey) -> bool {
-        self.0.trust(
-            host.to_string(),
-            port,
-            key.algorithm().to_string(),
-            key.fingerprint(HashAlg::Sha256).to_string(),
-        )
+    fn verify(&self, host: &str, port: u16, key: &PublicKey) -> Result<(), HostKeyError> {
+        let fingerprint = key.fingerprint(HashAlg::Sha256).to_string();
+        if self.0.trust(host.to_string(), port, key.algorithm().to_string(), fingerprint.clone()) {
+            Ok(())
+        } else {
+            Err(HostKeyError::NotTrusted { host: host.to_string(), fingerprint })
+        }
     }
 }
 
@@ -115,9 +115,13 @@ pub async fn connect_ssh(
             let session = SshSession::connect(&host, credential, Arc::new(PromptVerifier(prompt))).await?;
             let out = listener.clone();
             let shell = session
-                .open_shell("xterm-256color", params.cols, params.rows, move |b| out.on_output(b.to_vec()), move |s| {
-                    listener.on_exit(s)
-                })
+                .open_shell(
+                    "xterm-256color",
+                    params.cols,
+                    params.rows,
+                    move |b| out.on_output(b.to_vec()),
+                    move |s| listener.on_exit(s),
+                )
                 .await?;
             Ok(Arc::new(TerminalSession { session, shell }))
         })

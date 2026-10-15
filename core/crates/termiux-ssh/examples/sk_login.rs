@@ -6,12 +6,12 @@ use std::sync::Arc;
 
 use russh::keys::PublicKey;
 use termiux_model::Host;
-use termiux_ssh::{Credential, HostKeyVerifier, SshSession};
+use termiux_ssh::{Credential, HostKeyError, HostKeyVerifier, SshSession};
 
 struct AcceptAll;
 impl HostKeyVerifier for AcceptAll {
-    fn verify(&self, _: &str, _: u16, _: &PublicKey) -> bool {
-        true
+    fn verify(&self, _: &str, _: u16, _: &PublicKey) -> Result<(), HostKeyError> {
+        Ok(())
     }
 }
 

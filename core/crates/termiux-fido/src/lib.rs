@@ -71,10 +71,7 @@ impl SkKey {
 
 fn open_device() -> Result<FidoKeyHid, FidoError> {
     // TODO: let the user pick when several keys are plugged in; use the first for now.
-    let device = ctap_hid_fido2::get_fidokey_devices()
-        .into_iter()
-        .next()
-        .ok_or(FidoError::NoDevice)?;
+    let device = ctap_hid_fido2::get_fidokey_devices().into_iter().next().ok_or(FidoError::NoDevice)?;
     FidoKeyHid::new(&[device.param], &LibCfg::init()).map_err(device_err)
 }
 
@@ -84,7 +81,8 @@ pub fn generate_ed25519(application: &str, comment: &str, pin: Option<&str>) -> 
     // The attestation itself is not verified for SSH use, but the challenge should still be fresh.
     let mut challenge = [0u8; 32];
     getrandom::fill(&mut challenge).map_err(device_err)?;
-    let mut args = MakeCredentialArgsBuilder::new(application, &challenge).key_type(CredentialSupportedKeyType::Ed25519);
+    let mut args =
+        MakeCredentialArgsBuilder::new(application, &challenge).key_type(CredentialSupportedKeyType::Ed25519);
     args = match pin {
         Some(pin) => args.pin(pin),
         None => args.without_pin_and_uv(),
@@ -101,11 +99,7 @@ pub fn generate_ed25519(application: &str, comment: &str, pin: Option<&str>) -> 
     let mut public_key = PublicKey::from(KeyData::SkEd25519(public));
     public_key.set_comment(comment);
 
-    Ok(SkKey {
-        application: application.to_string(),
-        credential_id: attestation.credential_descriptor.id,
-        public_key,
-    })
+    Ok(SkKey { application: application.to_string(), credential_id: attestation.credential_descriptor.id, public_key })
 }
 
 /// Raw assertion pieces needed for an SSH sk signature.
@@ -143,11 +137,7 @@ pub fn sign(key: &SkKey, data: &[u8], pin: Option<&str>) -> Result<SkSignature, 
         .ok_or(FidoError::Protocol("no assertion"))?;
     // authenticatorData = rpIdHash(32) || flags(1) || signCount(4) || ...
     let flags = *assertion.auth_data.get(32).ok_or(FidoError::Protocol("auth data"))?;
-    Ok(SkSignature {
-        signature: assertion.signature,
-        flags,
-        counter: assertion.sign_count,
-    })
+    Ok(SkSignature { signature: assertion.signature, flags, counter: assertion.sign_count })
 }
 
 fn put_string(out: &mut Vec<u8>, bytes: &[u8]) {

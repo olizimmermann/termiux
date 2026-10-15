@@ -6,20 +6,20 @@ use std::time::Duration;
 
 use russh::keys::PublicKey;
 use termiux_model::{AuthMethod, Host};
-use termiux_ssh::{Credential, HostKeyVerifier, SshError, SshSession};
+use termiux_ssh::{Credential, HostKeyError, HostKeyVerifier, SshError, SshSession};
 use tokio::sync::oneshot;
 
 struct AcceptAll;
 impl HostKeyVerifier for AcceptAll {
-    fn verify(&self, _: &str, _: u16, _: &PublicKey) -> bool {
-        true
+    fn verify(&self, _: &str, _: u16, _: &PublicKey) -> Result<(), HostKeyError> {
+        Ok(())
     }
 }
 
 struct RejectAll;
 impl HostKeyVerifier for RejectAll {
-    fn verify(&self, _: &str, _: u16, _: &PublicKey) -> bool {
-        false
+    fn verify(&self, host: &str, _: u16, _: &PublicKey) -> Result<(), HostKeyError> {
+        Err(HostKeyError::NotTrusted { host: host.into(), fingerprint: String::new() })
     }
 }
 
@@ -34,9 +34,15 @@ async fn run_echo(session: &SshSession) -> String {
     let sink = output.clone();
     let (done_tx, done_rx) = oneshot::channel();
     let shell = session
-        .open_shell("xterm-256color", 80, 24, move |b| sink.lock().unwrap().extend_from_slice(b), move |_| {
-            let _ = done_tx.send(());
-        })
+        .open_shell(
+            "xterm-256color",
+            80,
+            24,
+            move |b| sink.lock().unwrap().extend_from_slice(b),
+            move |_| {
+                let _ = done_tx.send(());
+            },
+        )
         .await
         .unwrap();
     shell.resize(120, 40);
@@ -48,9 +54,8 @@ async fn run_echo(session: &SshSession) -> String {
 #[tokio::test]
 #[ignore = "needs docker sshd"]
 async fn password_auth_shell() {
-    let session = SshSession::connect(&test_host(), Credential::Password("termiux".into()), Arc::new(AcceptAll))
-        .await
-        .unwrap();
+    let session =
+        SshSession::connect(&test_host(), Credential::Password("termiux".into()), Arc::new(AcceptAll)).await.unwrap();
     let out = run_echo(&session).await;
     assert!(out.contains("termiux-42"), "{out}");
     assert!(out.contains("40 120"), "resize not applied: {out}");
@@ -62,9 +67,10 @@ async fn key_auth_shell() {
     let key = std::fs::read_to_string(std::env::var("TERMIUX_TEST_KEY").unwrap()).unwrap();
     let mut host = test_host();
     host.auth = AuthMethod::Key { key_id: uuid::Uuid::nil() };
-    let session = SshSession::connect(&host, Credential::PrivateKey { openssh: key, passphrase: None }, Arc::new(AcceptAll))
-        .await
-        .unwrap();
+    let session =
+        SshSession::connect(&host, Credential::PrivateKey { openssh: key, passphrase: None }, Arc::new(AcceptAll))
+            .await
+            .unwrap();
     assert!(run_echo(&session).await.contains("termiux-42"));
 }
 
@@ -79,5 +85,5 @@ async fn wrong_password_rejected() {
 #[ignore = "needs docker sshd"]
 async fn untrusted_host_key_rejected() {
     let err = SshSession::connect(&test_host(), Credential::Password("termiux".into()), Arc::new(RejectAll)).await;
-    assert!(err.is_err());
+    assert!(matches!(err, Err(SshError::HostKey(HostKeyError::NotTrusted { .. }))));
 }

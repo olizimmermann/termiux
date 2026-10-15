@@ -12,9 +12,12 @@ repository = "https://github.com/olizimmermann/termiux"
 termiux-model = { path = "crates/termiux-model" }
 termiux-ssh = { path = "crates/termiux-ssh" }
 termiux-fido = { path = "crates/termiux-fido" }
+termiux-store = { path = "crates/termiux-store" }
+
 russh = { version = "0.64", default-features = false, features = ["flate2", "ring", "rsa"] }
 tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util"] }
 serde = { version = "1.0", features = ["derive"] }
 uuid = { version = "1.28", features = ["v4", "serde"] }
+serde_json = "1.0"
 thiserror = "2.0"
 uniffi = "0.32"

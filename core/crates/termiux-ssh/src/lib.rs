@@ -1,13 +1,17 @@
 //! SSH client sessions built on russh.
 
+mod known_hosts;
+
 use std::sync::Arc;
 use std::time::Duration;
 
-use russh::client::{self, Handle};
-use russh::keys::{HashAlg, PrivateKeyWithHashAlg, PublicKey, PublicKeyOrCertificate, decode_secret_key};
-use russh::{ChannelMsg, ChannelWriteHalf};
+use russh::client::{self, Handle, KeyboardInteractiveAuthResponse};
+use russh::keys::{PrivateKeyWithHashAlg, PublicKey, PublicKeyOrCertificate, decode_secret_key};
+use russh::{ChannelMsg, ChannelWriteHalf, MethodKind};
 use termiux_model::Host;
 use tokio::sync::mpsc;
+
+pub use known_hosts::{HostKeyInfo, KnownHostsVerifier, NewHostPrompt};
 
 #[derive(Debug, thiserror::Error)]
 pub enum SshError {
@@ -19,28 +23,54 @@ pub enum SshError {
     AuthRejected,
     #[error(transparent)]
     SecurityKey(#[from] termiux_fido::SkAuthError),
-    #[error("host key rejected for {host}: {fingerprint}")]
-    HostKeyRejected { host: String, fingerprint: String },
+    #[error(transparent)]
+    HostKey(#[from] HostKeyError),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum HostKeyError {
+    #[error("host key for {host} not trusted ({fingerprint})")]
+    NotTrusted { host: String, fingerprint: String },
+    #[error(
+        "HOST KEY CHANGED for {host}: now {fingerprint}, previously {previous_fingerprint}. \
+         This could be an attack; connection refused"
+    )]
+    Changed { host: String, fingerprint: String, previous_fingerprint: String },
+    #[error("host key check failed: {0}")]
+    Internal(String),
 }
 
 /// Secret material resolved from the platform secret store right before connecting.
 pub enum Credential {
     Password(String),
-    PrivateKey { openssh: String, passphrase: Option<String> },
+    PrivateKey {
+        openssh: String,
+        passphrase: Option<String>,
+    },
     /// FIDO2 key on a hardware authenticator; signing needs a touch (and the PIN if set).
-    SecurityKey { key: termiux_fido::SkKey, pin: Option<String> },
+    SecurityKey {
+        key: termiux_fido::SkKey,
+        pin: Option<String>,
+    },
+    /// Server-driven prompts (OTP codes, PAM conversations, …).
+    KeyboardInteractive(Arc<dyn KeyboardInteractiveResponder>),
 }
 
-/// Decides whether a server's host key is trusted (known_hosts / TOFU prompt).
+/// Answers keyboard-interactive prompts, typically by asking the user. May block.
+pub trait KeyboardInteractiveResponder: Send + Sync + 'static {
+    /// `prompts` are `(text, echo)` pairs. Return `None` to cancel.
+    fn respond(&self, name: &str, instructions: &str, prompts: &[(String, bool)]) -> Option<Vec<String>>;
+}
+
+/// Decides whether a server's host key is trusted. May block on a user prompt.
 pub trait HostKeyVerifier: Send + Sync + 'static {
-    fn verify(&self, host: &str, port: u16, key: &PublicKey) -> bool;
+    fn verify(&self, host: &str, port: u16, key: &PublicKey) -> Result<(), HostKeyError>;
 }
 
 struct ClientHandler {
     host: String,
     port: u16,
     verifier: Arc<dyn HostKeyVerifier>,
-    rejected: Option<String>,
 }
 
 impl client::Handler for ClientHandler {
@@ -48,19 +78,16 @@ impl client::Handler for ClientHandler {
 
     async fn check_server_key(&mut self, server_key: &PublicKeyOrCertificate) -> Result<bool, SshError> {
         let key = match server_key {
-            PublicKeyOrCertificate::PublicKey { key, .. } => key,
+            PublicKeyOrCertificate::PublicKey { key, .. } => key.clone(),
             // Host certificates are not supported yet; treat as untrusted.
             PublicKeyOrCertificate::Certificate(_) => return Ok(false),
         };
         // The verifier may block on a user prompt; keep it off the async workers.
-        let (verifier, host, port, key_owned) = (self.verifier.clone(), self.host.clone(), self.port, key.clone());
-        let ok = tokio::task::spawn_blocking(move || verifier.verify(&host, port, &key_owned))
+        let (verifier, host, port) = (self.verifier.clone(), self.host.clone(), self.port);
+        tokio::task::spawn_blocking(move || verifier.verify(&host, port, &key))
             .await
-            .unwrap_or(false);
-        if !ok {
-            self.rejected = Some(key.fingerprint(HashAlg::Sha256).to_string());
-        }
-        Ok(ok)
+            .map_err(|e| HostKeyError::Internal(e.to_string()))??;
+        Ok(true)
     }
 }
 
@@ -75,21 +102,34 @@ impl SshSession {
         verifier: Arc<dyn HostKeyVerifier>,
     ) -> Result<Self, SshError> {
         let keepalive = (host.keepalive_secs > 0).then(|| Duration::from_secs(host.keepalive_secs.into()));
-        let config = Arc::new(client::Config {
-            keepalive_interval: keepalive,
-            keepalive_max: 3,
-            ..Default::default()
-        });
-        let handler = ClientHandler {
-            host: host.hostname.clone(),
-            port: host.port,
-            verifier,
-            rejected: None,
-        };
+        let config = Arc::new(client::Config { keepalive_interval: keepalive, keepalive_max: 3, ..Default::default() });
+        let handler = ClientHandler { host: host.hostname.clone(), port: host.port, verifier };
         let mut handle = client::connect(config, (host.hostname.as_str(), host.port), handler).await?;
 
         let auth = match credential {
-            Credential::Password(password) => handle.authenticate_password(&host.username, password).await?,
+            Credential::Password(password) => {
+                let result = handle.authenticate_password(&host.username, password.clone()).await?;
+                match result {
+                    // Many servers (PAM) only take passwords through keyboard-interactive.
+                    russh::client::AuthResult::Failure { ref remaining_methods, .. }
+                        if remaining_methods.contains(&MethodKind::KeyboardInteractive) =>
+                    {
+                        let responder = PasswordResponder(password);
+                        keyboard_interactive(&mut handle, &host.username, &responder).await?
+                    }
+                    other => other.success(),
+                }
+                .then_some(())
+                .ok_or(SshError::AuthRejected)?;
+                return Ok(Self { handle });
+            }
+            Credential::KeyboardInteractive(responder) => {
+                keyboard_interactive(&mut handle, &host.username, responder.as_ref())
+                    .await?
+                    .then_some(())
+                    .ok_or(SshError::AuthRejected)?;
+                return Ok(Self { handle });
+            }
             Credential::PrivateKey { openssh, passphrase } => {
                 let key = decode_secret_key(&openssh, passphrase.as_deref())?;
                 let hash = handle.best_supported_rsa_hash().await?.flatten();
@@ -99,9 +139,7 @@ impl SshSession {
             Credential::SecurityKey { key, pin } => {
                 let public = key.public_key.clone();
                 let mut signer = termiux_fido::SkSigner { key, pin };
-                handle
-                    .authenticate_publickey_with(&host.username, public, None, &mut signer)
-                    .await?
+                handle.authenticate_publickey_with(&host.username, public, None, &mut signer).await?
             }
         };
         if !auth.success() {
@@ -157,11 +195,49 @@ impl SshSession {
     }
 
     pub async fn disconnect(&self) -> Result<(), SshError> {
-        self.handle
-            .disconnect(russh::Disconnect::ByApplication, "", "en")
-            .await?;
+        self.handle.disconnect(russh::Disconnect::ByApplication, "", "en").await?;
         Ok(())
     }
+}
+
+/// Answers a single hidden prompt with a stored password; refuses anything else.
+struct PasswordResponder(String);
+
+impl KeyboardInteractiveResponder for PasswordResponder {
+    fn respond(&self, _: &str, _: &str, prompts: &[(String, bool)]) -> Option<Vec<String>> {
+        match prompts {
+            [] => Some(Vec::new()),
+            [(_, false)] => Some(vec![self.0.clone()]),
+            _ => None,
+        }
+    }
+}
+
+/// Runs a keyboard-interactive exchange. Returns whether the server accepted it.
+async fn keyboard_interactive<H: client::Handler>(
+    handle: &mut Handle<H>,
+    user: &str,
+    responder: &dyn KeyboardInteractiveResponder,
+) -> Result<bool, SshError> {
+    let mut reply = handle.authenticate_keyboard_interactive_start(user, None).await?;
+    // Servers may send several rounds (e.g. password, then OTP); cap to avoid loops.
+    for _ in 0..16 {
+        match reply {
+            KeyboardInteractiveAuthResponse::Success => return Ok(true),
+            KeyboardInteractiveAuthResponse::Failure { .. } => return Ok(false),
+            KeyboardInteractiveAuthResponse::InfoRequest { name, instructions, prompts } => {
+                let prompts: Vec<_> = prompts.into_iter().map(|p| (p.prompt, p.echo)).collect();
+                let Some(answers) = responder.respond(&name, &instructions, &prompts) else {
+                    return Ok(false);
+                };
+                if answers.len() != prompts.len() {
+                    return Ok(false);
+                }
+                reply = handle.authenticate_keyboard_interactive_respond(answers).await?;
+            }
+        }
+    }
+    Ok(false)
 }
 
 async fn close_quietly(write: &ChannelWriteHalf<client::Msg>) -> Result<(), russh::Error> {
