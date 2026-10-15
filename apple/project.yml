@@ -9,18 +9,19 @@ packages:
     path: Packages/TermiuxCore
   SwiftTerm:
     url: https://github.com/migueldeicaza/SwiftTerm
-    from: 1.20.0
-targets:
-  Termiux:
+    exactVersion: 1.99.0
+targetTemplates:
+  TermiuxApp:
     type: application
     platform: macOS
-    sources: [Termiux/Sources, Termiux/Resources]
+    sources: [Termiux/Sources]
     dependencies:
       - package: TermiuxCore
       - package: SwiftTerm
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.ozimmermann.termiux
+        PRODUCT_NAME: Termiux
         MARKETING_VERSION: "0.1.0"
         CURRENT_PROJECT_VERSION: "1"
         SWIFT_VERSION: "6.0"
@@ -29,3 +30,18 @@ targets:
         INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.developer-tools
         CODE_SIGN_IDENTITY: "-"
         ENABLE_HARDENED_RUNTIME: YES
+targets:
+  # Notarized direct download: local shell, ~/.ssh, ssh-agent.
+  Termiux:
+    templates: [TermiuxApp]
+    settings:
+      base:
+        CODE_SIGN_ENTITLEMENTS: Termiux/Config/Direct.entitlements
+  # Mac App Store: sandboxed, features that need the sandbox lifted are compiled out.
+  TermiuxAppStore:
+    templates: [TermiuxApp]
+    settings:
+      base:
+        CODE_SIGN_ENTITLEMENTS: Termiux/Config/AppStore.entitlements
+        PRODUCT_NAME: Termiux AppStore
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) SANDBOXED"
