@@ -221,3 +221,26 @@ fn platform_keys_resolve_to_external_signer() {
     // No platform signer on this "device".
     assert!(matches!(core.resolve_credential(&host, &ui), Err(SessionError::Unsupported(_))));
 }
+
+struct NullSink;
+impl TerminalSink for NullSink {
+    fn output(&self, _: &[u8]) {}
+    fn ended(&self, _: SessionEnd) {}
+}
+
+#[tokio::test]
+async fn jump_host_misconfiguration_fails_early() {
+    let core = core();
+    let (_, ui) = ui(&[]);
+
+    let mut looping = Host::new("loop", "example.invalid", "me");
+    looping.jump_hosts = vec![looping.id];
+    let result = core.connect(looping, 80, 24, ui.clone(), Arc::new(NullSink)).await;
+    assert!(matches!(result, Err(SessionError::JumpLoop)));
+
+    let mut dangling = Host::new("dangling", "example.invalid", "me");
+    let missing = uuid::Uuid::new_v4();
+    dangling.jump_hosts = vec![missing];
+    let result = core.connect(dangling, 80, 24, ui, Arc::new(NullSink)).await;
+    assert!(matches!(result, Err(SessionError::MissingJumpHost(id)) if id == missing));
+}

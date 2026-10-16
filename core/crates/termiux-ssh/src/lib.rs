@@ -1,5 +1,6 @@
 //! SSH client sessions built on russh.
 
+pub mod forward;
 mod known_hosts;
 
 use std::sync::Arc;
@@ -31,6 +32,8 @@ pub enum SshError {
     Agent(String),
     #[error("ssh-agent has no keys")]
     AgentEmpty,
+    #[error("port forward: {0}")]
+    Forward(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -144,14 +147,48 @@ fn host_key_preference(known: &[String]) -> Vec<Algorithm> {
     algs
 }
 
+/// Remote forwards (-R) by (bind address, bound port) → local target.
+pub(crate) type RemoteForwards = Arc<std::sync::Mutex<std::collections::HashMap<(String, u32), (String, u16)>>>;
+
 struct ClientHandler {
     host: String,
     port: u16,
     verifier: Arc<dyn HostKeyVerifier>,
+    remote_forwards: RemoteForwards,
 }
 
 impl client::Handler for ClientHandler {
     type Error = SshError;
+
+    /// The server opened a connection for one of our remote (-R) forwards.
+    async fn server_channel_open_forwarded_tcpip(
+        &mut self,
+        channel: russh::Channel<client::Msg>,
+        connected_address: &str,
+        connected_port: u32,
+        _originator_address: &str,
+        _originator_port: u32,
+        reply: client::ChannelOpenHandle,
+        _session: &mut client::Session,
+    ) -> Result<(), SshError> {
+        let target = self
+            .remote_forwards
+            .lock()
+            .ok()
+            .and_then(|f| f.get(&(connected_address.to_string(), connected_port)).cloned());
+        let Some((host, port)) = target else {
+            reply.reject(russh::ChannelOpenFailure::AdministrativelyProhibited).await;
+            return Ok(());
+        };
+        reply.accept().await;
+        tokio::spawn(async move {
+            if let Ok(mut local) = tokio::net::TcpStream::connect((host.as_str(), port)).await {
+                let mut remote = channel.into_stream();
+                let _ = tokio::io::copy_bidirectional(&mut local, &mut remote).await;
+            }
+        });
+        Ok(())
+    }
 
     async fn check_server_key(&mut self, server_key: &PublicKeyOrCertificate) -> Result<bool, SshError> {
         let key = match server_key {
@@ -170,6 +207,9 @@ impl client::Handler for ClientHandler {
 
 pub struct SshSession {
     handle: Handle<ClientHandler>,
+    remote_forwards: RemoteForwards,
+    /// The jump host this session is tunnelled through; kept alive with it.
+    via: Option<Arc<SshSession>>,
 }
 
 impl SshSession {
@@ -177,6 +217,26 @@ impl SshSession {
         host: &Host,
         credential: Credential,
         verifier: Arc<dyn HostKeyVerifier>,
+    ) -> Result<Self, SshError> {
+        Self::connect_inner(host, credential, verifier, None).await
+    }
+
+    /// Connects to `host` through an existing session (ProxyJump): the SSH connection runs
+    /// inside a direct-tcpip channel of `jump`. Host keys are checked for `host` itself.
+    pub async fn connect_via(
+        jump: Arc<SshSession>,
+        host: &Host,
+        credential: Credential,
+        verifier: Arc<dyn HostKeyVerifier>,
+    ) -> Result<Self, SshError> {
+        Self::connect_inner(host, credential, verifier, Some(jump)).await
+    }
+
+    async fn connect_inner(
+        host: &Host,
+        credential: Credential,
+        verifier: Arc<dyn HostKeyVerifier>,
+        via: Option<Arc<SshSession>>,
     ) -> Result<Self, SshError> {
         let keepalive = (host.keepalive_secs > 0).then(|| Duration::from_secs(host.keepalive_secs.into()));
         let preferred = Preferred {
@@ -189,8 +249,28 @@ impl SshSession {
             preferred,
             ..Default::default()
         });
-        let handler = ClientHandler { host: host.hostname.clone(), port: host.port, verifier };
-        let mut handle = client::connect(config, (host.hostname.as_str(), host.port), handler).await?;
+        let remote_forwards = RemoteForwards::default();
+        let handler = ClientHandler {
+            host: host.hostname.clone(),
+            port: host.port,
+            verifier,
+            remote_forwards: remote_forwards.clone(),
+        };
+        let mut handle = match &via {
+            Some(jump) => {
+                let channel = jump
+                    .handle
+                    .channel_open_direct_tcpip(host.hostname.as_str(), host.port.into(), "127.0.0.1", 0)
+                    .await?;
+                client::connect_stream(config, channel.into_stream(), handler).await?
+            }
+            None => client::connect(config, (host.hostname.as_str(), host.port), handler).await?,
+        };
+        macro_rules! done {
+            () => {
+                Self { handle, remote_forwards, via }
+            };
+        }
 
         let auth = match credential {
             Credential::Password { password, fallback } => {
@@ -207,14 +287,14 @@ impl SshSession {
                 }
                 .then_some(())
                 .ok_or(SshError::AuthRejected)?;
-                return Ok(Self { handle });
+                return Ok(done!());
             }
             Credential::KeyboardInteractive(responder) => {
                 keyboard_interactive(&mut handle, &host.username, responder)
                     .await?
                     .then_some(())
                     .ok_or(SshError::AuthRejected)?;
-                return Ok(Self { handle });
+                return Ok(done!());
             }
             Credential::PrivateKey { openssh, passphrase } => {
                 let key = decode_secret_key(&openssh, passphrase.as_deref())?;
@@ -235,13 +315,13 @@ impl SshSession {
             }
             Credential::Agent { socket } => {
                 agent_auth(&mut handle, &host.username, socket).await?.then_some(()).ok_or(SshError::AuthRejected)?;
-                return Ok(Self { handle });
+                return Ok(done!());
             }
         };
         if !auth.success() {
             return Err(SshError::AuthRejected);
         }
-        Ok(Self { handle })
+        Ok(done!())
     }
 
     /// Opens an interactive shell with a PTY. Output bytes are delivered to `on_output`;
@@ -332,6 +412,11 @@ impl SshSession {
             }
         }
         Ok((status, output))
+    }
+
+    /// The jump host session, if this one is tunnelled.
+    pub fn via(&self) -> Option<&Arc<SshSession>> {
+        self.via.as_ref()
     }
 
     pub fn is_closed(&self) -> bool {

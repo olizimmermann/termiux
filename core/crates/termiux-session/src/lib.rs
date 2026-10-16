@@ -43,6 +43,10 @@ pub enum SessionError {
     Keys(#[from] termiux_keys::KeyError),
     #[error("installing the key failed: {0}")]
     InstallFailed(String),
+    #[error("jump host {0} not found")]
+    MissingJumpHost(Uuid),
+    #[error("jump hosts form a loop")]
+    JumpLoop,
 }
 
 /// Everything the core may need to ask the user while connecting. All methods may block
@@ -323,27 +327,44 @@ impl Core {
     }
 
     /// Connects to a saved host and opens an interactive shell.
-    async fn connect_session(&self, host: &Host, ui: Arc<dyn Interaction>) -> Result<SshSession, SessionError> {
+    /// Resolves a host's credential off the async workers (it may prompt the user).
+    async fn credential_for(&self, host: &Host, ui: &Arc<dyn Interaction>) -> Result<Credential, SessionError> {
         let (store, secrets, platform, agent_socket) =
             (self.store.clone(), self.secrets.clone(), self.platform.clone(), self.agent_socket.clone());
-        let (resolve_host, resolve_ui) = (host.clone(), ui.clone());
-        // Resolving may prompt the user; keep it off the async workers.
-        let credential = tokio::task::spawn_blocking(move || {
-            Core { store, secrets, platform, agent_socket }.resolve_credential(&resolve_host, &resolve_ui)
+        let (host, ui) = (host.clone(), ui.clone());
+        tokio::task::spawn_blocking(move || {
+            Core { store, secrets, platform, agent_socket }.resolve_credential(&host, &ui)
         })
         .await
-        .map_err(|_| SessionError::Cancelled)??;
-        self.connect_with(host, credential, ui).await
+        .map_err(|_| SessionError::Cancelled)?
     }
 
-    async fn connect_with(
-        &self,
-        host: &Host,
-        credential: Credential,
-        ui: Arc<dyn Interaction>,
-    ) -> Result<SshSession, SessionError> {
-        let verifier = Arc::new(KnownHostsVerifier { store: self.store.clone(), prompt: Arc::new(PromptAdapter(ui)) });
-        Ok(SshSession::connect(host, credential, verifier).await?)
+    /// Connects to `host`, hopping through its jump hosts in order (like ProxyJump). Each
+    /// hop uses its own saved credentials and host key check; the jump hosts' own jump
+    /// settings are not followed.
+    async fn connect_session(&self, host: &Host, ui: Arc<dyn Interaction>) -> Result<SshSession, SessionError> {
+        let verifier =
+            Arc::new(KnownHostsVerifier { store: self.store.clone(), prompt: Arc::new(PromptAdapter(ui.clone())) });
+        let mut seen = std::collections::HashSet::from([host.id]);
+        let mut via: Option<Arc<SshSession>> = None;
+        for id in &host.jump_hosts {
+            if !seen.insert(*id) {
+                return Err(SessionError::JumpLoop);
+            }
+            let jump = self.store.host(*id)?.ok_or(SessionError::MissingJumpHost(*id))?;
+            ui.status(&format!("Connecting to jump host {}…", jump.label));
+            let credential = self.credential_for(&jump, &ui).await?;
+            let session = match via {
+                Some(previous) => SshSession::connect_via(previous, &jump, credential, verifier.clone()).await?,
+                None => SshSession::connect(&jump, credential, verifier.clone()).await?,
+            };
+            via = Some(Arc::new(session));
+        }
+        let credential = self.credential_for(host, &ui).await?;
+        Ok(match via {
+            Some(previous) => SshSession::connect_via(previous, host, credential, verifier).await?,
+            None => SshSession::connect(host, credential, verifier).await?,
+        })
     }
 
     pub async fn connect(
@@ -361,7 +382,15 @@ impl Core {
         if let Some(cmd) = host.startup_command.as_deref().filter(|c| !c.trim().is_empty()) {
             shell.write(format!("{cmd}\n").as_bytes());
         }
-        Ok(TerminalSession(Inner::Ssh { session: Arc::new(session), shell }))
+        let session = Arc::new(session);
+        let forwards = host.forwards.iter().map(|f| ForwardState { config: f.clone(), running: None, error: None });
+        let terminal =
+            TerminalSession(Inner::Ssh { session, shell, forwards: tokio::sync::Mutex::new(forwards.collect()) });
+        for f in host.forwards.iter().filter(|f| f.auto_start) {
+            // Failures are recorded per forward and shown in the UI; the shell stays usable.
+            let _ = terminal.start_forward(f.id).await;
+        }
+        Ok(terminal)
     }
 
     /// Starts a local shell (not available in sandboxed builds).
@@ -385,8 +414,24 @@ impl Core {
     }
 }
 
+/// A configured forward on a running session.
+pub struct ForwardState {
+    pub config: termiux_model::PortForward,
+    running: Option<termiux_ssh::forward::Forward>,
+    pub error: Option<String>,
+}
+
+/// Snapshot of a forward for the UI.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForwardStatus {
+    pub config: termiux_model::PortForward,
+    /// Where it listens while running.
+    pub bound: Option<(String, u16)>,
+    pub error: Option<String>,
+}
+
 enum Inner {
-    Ssh { session: Arc<SshSession>, shell: Shell },
+    Ssh { session: Arc<SshSession>, shell: Shell, forwards: tokio::sync::Mutex<Vec<ForwardState>> },
     Local { shell: LocalShell, killed: Arc<AtomicBool> },
 }
 
@@ -394,6 +439,66 @@ enum Inner {
 pub struct TerminalSession(Inner);
 
 impl TerminalSession {
+    /// Status of every configured forward (empty for local shells).
+    pub async fn forwards(&self) -> Vec<ForwardStatus> {
+        let Inner::Ssh { forwards, .. } = &self.0 else { return Vec::new() };
+        forwards
+            .lock()
+            .await
+            .iter()
+            .map(|f| ForwardStatus {
+                config: f.config.clone(),
+                bound: f.running.as_ref().map(|r| r.bound.clone()),
+                error: f.error.clone(),
+            })
+            .collect()
+    }
+
+    /// Starts a configured forward; errors are also recorded in its status.
+    pub async fn start_forward(&self, id: Uuid) -> Result<(), SessionError> {
+        use termiux_model::ForwardKind;
+        use termiux_ssh::forward;
+        let Inner::Ssh { session, forwards, .. } = &self.0 else {
+            return Err(SessionError::Unsupported("forwards on local shells"));
+        };
+        let mut forwards = forwards.lock().await;
+        let state =
+            forwards.iter_mut().find(|f| f.config.id == id).ok_or(SessionError::Unsupported("unknown forward"))?;
+        if state.running.is_some() {
+            return Ok(());
+        }
+        let c = state.config.clone();
+        let result = match c.kind {
+            ForwardKind::Local => {
+                forward::local(session.clone(), &c.bind_host, c.bind_port, &c.target_host, c.target_port).await
+            }
+            ForwardKind::Remote => {
+                forward::remote(session.clone(), &c.bind_host, c.bind_port, &c.target_host, c.target_port).await
+            }
+            ForwardKind::Dynamic => forward::dynamic(session.clone(), &c.bind_host, c.bind_port).await,
+        };
+        match result {
+            Ok(running) => {
+                state.running = Some(running);
+                state.error = None;
+                Ok(())
+            }
+            Err(e) => {
+                state.error = Some(e.to_string());
+                Err(e.into())
+            }
+        }
+    }
+
+    pub async fn stop_forward(&self, id: Uuid) {
+        let Inner::Ssh { forwards, .. } = &self.0 else { return };
+        if let Some(state) = forwards.lock().await.iter_mut().find(|f| f.config.id == id)
+            && let Some(running) = state.running.take()
+        {
+            running.stop().await;
+        }
+    }
+
     pub fn write(&self, data: &[u8]) {
         match &self.0 {
             Inner::Ssh { shell, .. } => shell.write(data),
@@ -416,7 +521,13 @@ impl TerminalSession {
     /// Ends the session; the sink receives `EndReason::UserClosed`.
     pub async fn close(&self) {
         match &self.0 {
-            Inner::Ssh { session, shell } => {
+            Inner::Ssh { session, shell, forwards } => {
+                // Stop listeners first so nothing new is tunnelled into a closing session.
+                for state in forwards.lock().await.iter_mut() {
+                    if let Some(running) = state.running.take() {
+                        running.stop().await;
+                    }
+                }
                 shell.mark_user_closed();
                 let _ = session.disconnect().await;
             }

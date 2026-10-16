@@ -293,6 +293,77 @@ pub struct HostRecord {
     pub startup_command: Option<String>,
     /// `None` uses the app's default theme.
     pub theme_id: Option<String>,
+    /// Hosts to hop through, in order (ProxyJump).
+    pub jump_host_ids: Vec<String>,
+    pub forwards: Vec<PortForwardRecord>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum ForwardKind {
+    /// -L: listen here, connect from the server.
+    Local,
+    /// -R: listen on the server, connect from here.
+    Remote,
+    /// -D: SOCKS5 proxy here.
+    Dynamic,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct PortForwardRecord {
+    /// Empty for a new forward.
+    pub id: String,
+    pub kind: ForwardKind,
+    pub bind_host: String,
+    pub bind_port: u16,
+    pub target_host: String,
+    pub target_port: u16,
+    pub auto_start: bool,
+}
+
+impl From<&model::PortForward> for PortForwardRecord {
+    fn from(f: &model::PortForward) -> Self {
+        Self {
+            id: f.id.to_string(),
+            kind: match f.kind {
+                model::ForwardKind::Local => ForwardKind::Local,
+                model::ForwardKind::Remote => ForwardKind::Remote,
+                model::ForwardKind::Dynamic => ForwardKind::Dynamic,
+            },
+            bind_host: f.bind_host.clone(),
+            bind_port: f.bind_port,
+            target_host: f.target_host.clone(),
+            target_port: f.target_port,
+            auto_start: f.auto_start,
+        }
+    }
+}
+
+impl PortForwardRecord {
+    fn to_model(&self) -> Result<model::PortForward, CoreError> {
+        Ok(model::PortForward {
+            id: if self.id.is_empty() { Uuid::new_v4() } else { parse_id(&self.id)? },
+            kind: match self.kind {
+                ForwardKind::Local => model::ForwardKind::Local,
+                ForwardKind::Remote => model::ForwardKind::Remote,
+                ForwardKind::Dynamic => model::ForwardKind::Dynamic,
+            },
+            bind_host: if self.bind_host.is_empty() { "127.0.0.1".into() } else { self.bind_host.clone() },
+            bind_port: self.bind_port,
+            target_host: self.target_host.clone(),
+            target_port: self.target_port,
+            auto_start: self.auto_start,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct ForwardStatus {
+    pub forward: PortForwardRecord,
+    pub running: bool,
+    /// Actual listening address while running (useful when port 0 was requested).
+    pub bound_host: Option<String>,
+    pub bound_port: Option<u16>,
+    pub error: Option<String>,
 }
 
 impl From<&model::Host> for HostRecord {
@@ -315,6 +386,8 @@ impl From<&model::Host> for HostRecord {
             term: h.term.clone(),
             startup_command: h.startup_command.clone(),
             theme_id: h.theme_id.map(|t| t.to_string()),
+            jump_host_ids: h.jump_hosts.iter().map(Uuid::to_string).collect(),
+            forwards: h.forwards.iter().map(PortForwardRecord::from).collect(),
         }
     }
 }
@@ -473,6 +546,8 @@ impl TermiuxCore {
         host.term = if record.term.is_empty() { "xterm-256color".into() } else { record.term };
         host.startup_command = record.startup_command.filter(|c| !c.trim().is_empty());
         host.theme_id = record.theme_id.as_deref().map(parse_id).transpose()?;
+        host.jump_hosts = record.jump_host_ids.iter().map(|id| parse_id(id)).collect::<Result<_, _>>()?;
+        host.forwards = record.forwards.iter().map(PortForwardRecord::to_model).collect::<Result<_, _>>()?;
         host.updated_at = model::now();
 
         let old_secret = match &host.auth {
@@ -686,6 +761,30 @@ impl TerminalSession {
     pub async fn close(&self) {
         self.inner.close().await;
     }
+
+    pub async fn forwards(&self) -> Vec<ForwardStatus> {
+        self.inner
+            .forwards()
+            .await
+            .iter()
+            .map(|f| ForwardStatus {
+                forward: PortForwardRecord::from(&f.config),
+                running: f.bound.is_some(),
+                bound_host: f.bound.as_ref().map(|b| b.0.clone()),
+                bound_port: f.bound.as_ref().map(|b| b.1),
+                error: f.error.clone(),
+            })
+            .collect()
+    }
+
+    pub async fn start_forward(&self, id: String) -> Result<(), CoreError> {
+        Ok(self.inner.start_forward(parse_id(&id)?).await?)
+    }
+
+    pub async fn stop_forward(&self, id: String) -> Result<(), CoreError> {
+        self.inner.stop_forward(parse_id(&id)?).await;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -725,6 +824,16 @@ mod tests {
             term: String::new(),
             startup_command: Some("  ".into()),
             theme_id: None,
+            jump_host_ids: Vec::new(),
+            forwards: vec![PortForwardRecord {
+                id: String::new(),
+                kind: ForwardKind::Dynamic,
+                bind_host: String::new(),
+                bind_port: 1080,
+                target_host: String::new(),
+                target_port: 0,
+                auto_start: true,
+            }],
         }
     }
 
@@ -741,6 +850,9 @@ mod tests {
         assert_eq!(saved.auth, HostAuth::Password { saved: true });
         assert_eq!(saved.term, "xterm-256color");
         assert_eq!(saved.startup_command, None);
+        assert_eq!(saved.forwards.len(), 1);
+        assert!(!saved.forwards[0].id.is_empty(), "new forwards get an id");
+        assert_eq!(saved.forwards[0].bind_host, "127.0.0.1", "bind defaults to loopback");
         assert_eq!(secrets.0.lock().unwrap().len(), 1);
 
         // Editing other fields keeps the password.
