@@ -45,3 +45,27 @@ targets:
         CODE_SIGN_ENTITLEMENTS: Termiux/Config/AppStore.entitlements
         PRODUCT_NAME: Termiux AppStore
         SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) SANDBOXED"
+  TermiuxTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources: [TermiuxTests]
+    dependencies:
+      - target: Termiux
+    settings:
+      base:
+        SWIFT_VERSION: "6.0"
+        CODE_SIGN_IDENTITY: "-"
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/Termiux.app/Contents/MacOS/Termiux"
+        BUNDLE_LOADER: "$(TEST_HOST)"
+schemes:
+  Termiux:
+    build:
+      targets:
+        Termiux: all
+    test:
+      targets: [TermiuxTests]
+  TermiuxAppStore:
+    build:
+      targets:
+        TermiuxAppStore: all

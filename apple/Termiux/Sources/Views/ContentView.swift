@@ -10,11 +10,11 @@ struct ContentView: View {
     var body: some View {
         @Bindable var app = app
         NavigationSplitView {
-            List(selection: $app.selectedSessionID) {
-                if !app.sessions.isEmpty {
+            List(selection: $app.selectedTabID) {
+                if !app.tabs.isEmpty {
                     Section("Open") {
-                        ForEach(app.sessions) { session in
-                            SessionRow(session: session).tag(session.id)
+                        ForEach(app.tabs) { tab in
+                            SessionRow(tab: tab).tag(tab.id)
                         }
                     }
                 }
@@ -39,6 +39,10 @@ struct ContentView: View {
             .navigationSplitViewColumnWidth(min: 200, ideal: 240)
             .toolbar {
                 ToolbarItemGroup {
+                    Button { app.showingQuickConnect = true } label: {
+                        Label("Quick Connect", systemImage: "magnifyingglass")
+                    }
+                    .help("Quick Connect (⌘K)")
                     Button { editing = .new } label: { Label("New Host", systemImage: "plus") }
                     Button { showingKeys = true } label: { Label("Keys", systemImage: "key") }
                     if BuildFlavor.hasLocalShell {
@@ -47,13 +51,21 @@ struct ContentView: View {
                 }
             }
         } detail: {
-            if let session = app.selectedSession {
-                TerminalPane(session: session)
-                    .id(session.id)
-                    .navigationTitle(session.title)
-            } else {
-                EmptyState(onNewHost: { editing = .new })
+            VStack(spacing: 0) {
+                if app.tabs.count > 1 {
+                    TabBar()
+                }
+                if let tab = app.selectedTab {
+                    PaneTreeView(node: tab.root, tab: tab)
+                        .id(tab.id)
+                        .navigationTitle(tab.focused?.terminalTitle ?? tab.title)
+                } else {
+                    EmptyState(onNewHost: { editing = .new })
+                }
             }
+        }
+        .sheet(isPresented: $app.showingQuickConnect) {
+            QuickConnect()
         }
         .sheet(item: $editing) { host in
             HostEditor(host: host)
@@ -82,7 +94,8 @@ extension HostRecord: @retroactive Identifiable {
     static var new: HostRecord {
         HostRecord(
             id: "", label: "", groupId: nil, hostname: "", port: 22, username: NSUserName(),
-            auth: .password(saved: false), keepaliveSecs: 30, term: "xterm-256color", startupCommand: nil)
+            auth: .password(saved: false), keepaliveSecs: 30, term: "xterm-256color", startupCommand: nil,
+            themeId: nil)
     }
 }
 
@@ -101,18 +114,18 @@ private struct HostRow: View {
 }
 
 private struct SessionRow: View {
-    let session: TerminalSessionModel
+    let tab: WorkspaceTab
 
     var body: some View {
         Label {
-            Text(session.title)
+            Text(tab.title)
         } icon: {
             Circle().fill(color).frame(width: 8, height: 8)
         }
     }
 
     private var color: Color {
-        switch session.state {
+        switch tab.focused?.state {
         case .running: .green
         case .connecting: .yellow
         default: .red
@@ -128,6 +141,7 @@ private struct EmptyState: View {
         VStack(spacing: 14) {
             Image(systemName: "terminal").font(.system(size: 44)).foregroundStyle(.secondary)
             Text("Double-click a host to connect").font(.title3)
+            Text("⌘K Quick Connect · ⌘D split · ⌘T local shell").font(.caption).foregroundStyle(.secondary)
             HStack {
                 Button("New Host…", action: onNewHost)
                 if BuildFlavor.hasLocalShell {

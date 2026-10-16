@@ -19,6 +19,7 @@ struct HostEditor: View {
     @State private var keepalive: String
     @State private var term: String
     @State private var startupCommand: String
+    @State private var themeID: String
 
     init(host: HostRecord) {
         original = host
@@ -29,6 +30,7 @@ struct HostEditor: View {
         _keepalive = State(initialValue: String(host.keepaliveSecs))
         _term = State(initialValue: host.term)
         _startupCommand = State(initialValue: host.startupCommand ?? "")
+        _themeID = State(initialValue: host.themeId ?? "")
         switch host.auth {
         case .password:
             _auth = State(initialValue: .password)
@@ -87,6 +89,14 @@ struct HostEditor: View {
                             .foregroundStyle(.secondary)
                     }
                 }
+                Section("Appearance") {
+                    Picker("Theme", selection: $themeID) {
+                        Text("Default").tag("")
+                        ForEach(app.themes, id: \.id) { theme in
+                            Text(theme.name).tag(theme.id)
+                        }
+                    }
+                }
                 Section("Advanced") {
                     TextField("Keepalive (seconds)", text: $keepalive)
                     TextField("Terminal type", text: $term)
@@ -104,7 +114,7 @@ struct HostEditor: View {
             }
             .padding()
         }
-        .frame(width: 460, height: 560)
+        .frame(width: 460, height: 620)
     }
 
     private var isValid: Bool {
@@ -134,7 +144,8 @@ struct HostEditor: View {
             auth: hostAuth,
             keepaliveSecs: UInt32(keepalive) ?? 30,
             term: term.trimmingCharacters(in: .whitespaces),
-            startupCommand: startupCommand.isEmpty ? nil : startupCommand)
+            startupCommand: startupCommand.isEmpty ? nil : startupCommand,
+            themeId: themeID.isEmpty ? nil : themeID)
         if app.save(host: host, password: passwordChange) != nil {
             dismiss()
         }

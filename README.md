@@ -8,3 +8,15 @@ A fast, lightweight SSH client and terminal. macOS first; iOS, Linux, Windows an
 - `scripts/test-sshd.sh`: SSH integration tests against a throwaway OpenSSH server in Docker
 
 Licensed under GPL-3.0-or-later.
+
+## Development
+
+```sh
+scripts/build-xcframework.sh          # Rust core -> apple/Packages/TermiuxCore (PROFILE=debug PLATFORMS=macos for speed)
+(cd apple && xcodegen generate)       # regenerate Termiux.xcodeproj from project.yml
+(cd core && cargo test --workspace)   # Rust tests (Docker SSH tests: scripts/test-sshd.sh)
+xcodebuild -project apple/Termiux.xcodeproj -scheme Termiux -skipPackagePluginValidation test
+```
+
+Shortcuts: ⌘K quick connect · ⌘T local shell · ⌘D / ⌘⇧D split right/down · ⌘⌥←→↑↓ move between panes ·
+⌘W close pane · ⌘⇧W close tab · ⌘⇧[ ⌘⇧] / ⌘1–9 switch tabs.

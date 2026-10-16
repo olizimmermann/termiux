@@ -12,16 +12,51 @@ struct TermiuxApp: App {
         }
         .commands {
             CommandGroup(after: .newItem) {
+                Button("Quick Connect…") { app.showingQuickConnect = true }
+                    .keyboardShortcut("k", modifiers: .command)
                 if BuildFlavor.hasLocalShell {
                     Button("New Local Shell") { app.openLocalShell() }
-                        .keyboardShortcut("t", modifiers: [.command])
+                        .keyboardShortcut("t", modifiers: .command)
                 }
-                Button("Close Session") {
-                    if let session = app.selectedSession { app.close(session) }
-                }
-                .keyboardShortcut("w", modifiers: [.command, .shift])
-                .disabled(app.selectedSession == nil)
+                Divider()
+                Button("Split Right") { app.splitFocused(.horizontal) }
+                    .keyboardShortcut("d", modifiers: .command)
+                    .disabled(app.focusedSession == nil)
+                Button("Split Down") { app.splitFocused(.vertical) }
+                    .keyboardShortcut("d", modifiers: [.command, .shift])
+                    .disabled(app.focusedSession == nil)
+                Divider()
+                Button("Close Pane") { app.closeFocusedPane() }
+                    .keyboardShortcut("w", modifiers: .command)
+                    .disabled(app.focusedSession == nil)
+                Button("Close Tab") { if let tab = app.selectedTab { app.close(tab) } }
+                    .keyboardShortcut("w", modifiers: [.command, .shift])
+                    .disabled(app.selectedTab == nil)
             }
+            CommandMenu("Window Panes") {
+                Button("Next Tab") { app.selectTab(offset: 1) }
+                    .keyboardShortcut("]", modifiers: [.command, .shift])
+                Button("Previous Tab") { app.selectTab(offset: -1) }
+                    .keyboardShortcut("[", modifiers: [.command, .shift])
+                Divider()
+                Button("Focus Pane Left") { app.selectedTab?.moveFocus(.left) }
+                    .keyboardShortcut(.leftArrow, modifiers: [.command, .option])
+                Button("Focus Pane Right") { app.selectedTab?.moveFocus(.right) }
+                    .keyboardShortcut(.rightArrow, modifiers: [.command, .option])
+                Button("Focus Pane Above") { app.selectedTab?.moveFocus(.up) }
+                    .keyboardShortcut(.upArrow, modifiers: [.command, .option])
+                Button("Focus Pane Below") { app.selectedTab?.moveFocus(.down) }
+                    .keyboardShortcut(.downArrow, modifiers: [.command, .option])
+                Divider()
+                ForEach(1..<10) { n in
+                    Button(n == 9 ? "Last Tab" : "Tab \(n)") { app.selectTab(number: n) }
+                        .keyboardShortcut(KeyEquivalent(Character(String(n))), modifiers: .command)
+                }
+            }
+        }
+
+        Settings {
+            SettingsView().environment(app)
         }
     }
 }
