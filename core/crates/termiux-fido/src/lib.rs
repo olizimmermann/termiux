@@ -3,14 +3,12 @@
 //! Wire formats follow OpenSSH's PROTOCOL.u2f. The authenticator signs
 //! `sha256(application) || flags || counter || sha256(data)`; ctap-hid-fido2 hashes the
 //! challenge for us, so we pass the raw SSH data-to-sign as the challenge.
+//!
+//! USB HID access exists on desktop platforms only. iOS has no HID backend; there the app
+//! talks to the key through YubiKit and signs via the core's external-signer path.
 
-use ctap_hid_fido2::fidokey::get_assertion::get_assertion_params::GetAssertionArgsBuilder;
-use ctap_hid_fido2::fidokey::make_credential::make_credential_params::{
-    CredentialSupportedKeyType, MakeCredentialArgsBuilder,
-};
-use ctap_hid_fido2::{FidoKeyHid, LibCfg};
 use russh::keys::ssh_key::private::{KeypairData, SkEd25519 as SkEd25519Keypair};
-use russh::keys::ssh_key::public::{Ed25519PublicKey, KeyData, SkEd25519};
+use russh::keys::ssh_key::public::KeyData;
 use russh::keys::ssh_key::{LineEnding, PrivateKey, PublicKey};
 
 /// OpenSSH's default application string for SSH keys on FIDO devices.
@@ -40,6 +38,7 @@ pub enum FidoError {
 }
 
 /// Maps CTAP2 status codes (only exposed in ctap-hid-fido2's error text) to typed errors.
+#[cfg(not(target_os = "ios"))]
 fn device_err(e: impl std::fmt::Display) -> FidoError {
     let message = e.to_string();
     let has = |code: &str| message.contains(code);
@@ -90,39 +89,6 @@ impl SkKey {
     }
 }
 
-fn open_device() -> Result<FidoKeyHid, FidoError> {
-    // TODO: let the user pick when several keys are plugged in; use the first for now.
-    let device = ctap_hid_fido2::get_fidokey_devices().into_iter().next().ok_or(FidoError::NoDevice)?;
-    FidoKeyHid::new(&[device.param], &LibCfg::init()).map_err(device_err)
-}
-
-/// Creates a new ed25519 credential on the security key. Blocks until the user touches it.
-pub fn generate_ed25519(application: &str, comment: &str, pin: Option<&str>) -> Result<SkKey, FidoError> {
-    let device = open_device()?;
-    // The attestation itself is not verified for SSH use, but the challenge should still be fresh.
-    let mut challenge = [0u8; 32];
-    getrandom::fill(&mut challenge).map_err(device_err)?;
-    let mut args =
-        MakeCredentialArgsBuilder::new(application, &challenge).key_type(CredentialSupportedKeyType::Ed25519);
-    args = match pin {
-        Some(pin) => args.pin(pin),
-        None => args.without_pin_and_uv(),
-    };
-    let attestation = device.make_credential_with_args(&args.build()).map_err(device_err)?;
-
-    // credential_publickey.der is a SubjectPublicKeyInfo; the raw key is the last 32 bytes.
-    let der = &attestation.credential_publickey.der;
-    let raw: [u8; 32] = der
-        .get(der.len().saturating_sub(32)..)
-        .and_then(|s| s.try_into().ok())
-        .ok_or(FidoError::Protocol("ed25519 public key"))?;
-    let public = SkEd25519::new(Ed25519PublicKey(raw), application);
-    let mut public_key = PublicKey::from(KeyData::SkEd25519(public));
-    public_key.set_comment(comment);
-
-    Ok(SkKey { application: application.to_string(), credential_id: attestation.credential_descriptor.id, public_key })
-}
-
 /// Raw assertion pieces needed for an SSH sk signature.
 pub struct SkSignature {
     pub signature: Vec<u8>,
@@ -142,23 +108,96 @@ impl SkSignature {
     }
 }
 
+#[cfg(not(target_os = "ios"))]
+mod hid {
+    use ctap_hid_fido2::fidokey::get_assertion::get_assertion_params::GetAssertionArgsBuilder;
+    use ctap_hid_fido2::fidokey::make_credential::make_credential_params::{
+        CredentialSupportedKeyType, MakeCredentialArgsBuilder,
+    };
+    use ctap_hid_fido2::{FidoKeyHid, LibCfg};
+    use russh::keys::ssh_key::PublicKey;
+    use russh::keys::ssh_key::public::{Ed25519PublicKey, KeyData, SkEd25519};
+
+    use super::{FidoError, SkKey, SkSignature, device_err};
+
+    fn open_device() -> Result<FidoKeyHid, FidoError> {
+        // TODO: let the user pick when several keys are plugged in; use the first for now.
+        let device = ctap_hid_fido2::get_fidokey_devices().into_iter().next().ok_or(FidoError::NoDevice)?;
+        FidoKeyHid::new(&[device.param], &LibCfg::init()).map_err(device_err)
+    }
+
+    /// Blocks until the user touches the key.
+    pub(super) fn generate_ed25519(application: &str, comment: &str, pin: Option<&str>) -> Result<SkKey, FidoError> {
+        let device = open_device()?;
+        // The attestation itself is not verified for SSH use, but the challenge should still be fresh.
+        let mut challenge = [0u8; 32];
+        getrandom::fill(&mut challenge).map_err(device_err)?;
+        let mut args =
+            MakeCredentialArgsBuilder::new(application, &challenge).key_type(CredentialSupportedKeyType::Ed25519);
+        args = match pin {
+            Some(pin) => args.pin(pin),
+            None => args.without_pin_and_uv(),
+        };
+        let attestation = device.make_credential_with_args(&args.build()).map_err(device_err)?;
+
+        // credential_publickey.der is a SubjectPublicKeyInfo; the raw key is the last 32 bytes.
+        let der = &attestation.credential_publickey.der;
+        let raw: [u8; 32] = der
+            .get(der.len().saturating_sub(32)..)
+            .and_then(|s| s.try_into().ok())
+            .ok_or(FidoError::Protocol("ed25519 public key"))?;
+        let public = SkEd25519::new(Ed25519PublicKey(raw), application);
+        let mut public_key = PublicKey::from(KeyData::SkEd25519(public));
+        public_key.set_comment(comment);
+
+        Ok(SkKey {
+            application: application.to_string(),
+            credential_id: attestation.credential_descriptor.id,
+            public_key,
+        })
+    }
+
+    /// Blocks until the user touches the key.
+    pub(super) fn sign(key: &SkKey, data: &[u8], pin: Option<&str>) -> Result<SkSignature, FidoError> {
+        let device = open_device()?;
+        let mut args = GetAssertionArgsBuilder::new(&key.application, data).credential_id(&key.credential_id);
+        args = match pin {
+            Some(pin) => args.pin(pin),
+            None => args.without_pin_and_uv(),
+        };
+        let assertion = device
+            .get_assertion_with_args(&args.build())
+            .map_err(device_err)?
+            .into_iter()
+            .next()
+            .ok_or(FidoError::Protocol("no assertion"))?;
+        // authenticatorData = rpIdHash(32) || flags(1) || signCount(4) || ...
+        let flags = *assertion.auth_data.get(32).ok_or(FidoError::Protocol("auth data"))?;
+        Ok(SkSignature { signature: assertion.signature, flags, counter: assertion.sign_count })
+    }
+}
+
+#[cfg(target_os = "ios")]
+mod hid {
+    use super::{FidoError, SkKey, SkSignature};
+
+    pub(super) fn generate_ed25519(_: &str, _: &str, _: Option<&str>) -> Result<SkKey, FidoError> {
+        Err(FidoError::NoDevice)
+    }
+
+    pub(super) fn sign(_: &SkKey, _: &[u8], _: Option<&str>) -> Result<SkSignature, FidoError> {
+        Err(FidoError::NoDevice)
+    }
+}
+
+/// Creates a new ed25519 credential on the security key. Blocks until the user touches it.
+pub fn generate_ed25519(application: &str, comment: &str, pin: Option<&str>) -> Result<SkKey, FidoError> {
+    hid::generate_ed25519(application, comment, pin)
+}
+
 /// Signs `data` with the credential. Blocks until the user touches the key.
 pub fn sign(key: &SkKey, data: &[u8], pin: Option<&str>) -> Result<SkSignature, FidoError> {
-    let device = open_device()?;
-    let mut args = GetAssertionArgsBuilder::new(&key.application, data).credential_id(&key.credential_id);
-    args = match pin {
-        Some(pin) => args.pin(pin),
-        None => args.without_pin_and_uv(),
-    };
-    let assertion = device
-        .get_assertion_with_args(&args.build())
-        .map_err(device_err)?
-        .into_iter()
-        .next()
-        .ok_or(FidoError::Protocol("no assertion"))?;
-    // authenticatorData = rpIdHash(32) || flags(1) || signCount(4) || ...
-    let flags = *assertion.auth_data.get(32).ok_or(FidoError::Protocol("auth data"))?;
-    Ok(SkSignature { signature: assertion.signature, flags, counter: assertion.sign_count })
+    hid::sign(key, data, pin)
 }
 
 fn put_string(out: &mut Vec<u8>, bytes: &[u8]) {

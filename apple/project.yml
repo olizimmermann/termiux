@@ -14,7 +14,7 @@ targetTemplates:
   TermiuxApp:
     type: application
     platform: macOS
-    sources: [Termiux/Sources]
+    sources: [Termiux/Sources/Shared, Termiux/Sources/macOS]
     dependencies:
       - package: TermiuxCore
       - package: SwiftTerm

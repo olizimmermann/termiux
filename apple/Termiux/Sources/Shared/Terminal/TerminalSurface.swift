@@ -1,12 +1,16 @@
-import AppKit
 import SwiftTerm
+#if os(macOS)
+import AppKit
+#else
+import UIKit
+#endif
 import TermiuxCore
 
 /// The terminal emulator + renderer behind a pane. SwiftTerm today; libghostty is the
 /// candidate replacement, so the rest of the app only talks to this protocol.
 @MainActor
 protocol TerminalSurface: AnyObject {
-    var view: NSView { get }
+    var view: PlatformView { get }
     var dimensions: (cols: Int, rows: Int) { get }
     /// Keystrokes and pasted text to send to the session.
     var onInput: ((Data) -> Void)? { get set }
@@ -29,13 +33,13 @@ final class SwiftTermSurface: NSObject, TerminalSurface, TerminalViewDelegate {
     var onFocus: (() -> Void)?
 
     override init() {
-        terminalView = FocusReportingTerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 500))
+        terminalView = FocusReportingTerminalView(frame: CGRect(x: 0, y: 0, width: 800, height: 500))
         super.init()
         terminalView.terminalDelegate = self
         terminalView.onMouseDown = { [weak self] in self?.onFocus?() }
     }
 
-    var view: NSView { terminalView }
+    var view: PlatformView { terminalView }
 
     var dimensions: (cols: Int, rows: Int) {
         let d = terminalView.terminalDimensions
@@ -51,23 +55,31 @@ final class SwiftTermSurface: NSObject, TerminalSurface, TerminalViewDelegate {
     }
 
     func focus() {
+        #if os(macOS)
         terminalView.window?.makeFirstResponder(terminalView)
+        #else
+        _ = terminalView.becomeFirstResponder()
+        #endif
     }
 
     func apply(theme: ThemeRecord, appearance: Appearance) {
         terminalView.font = appearance.font
-        let palette = theme.palette.compactMap { NSColor(hex: $0) }
+        let palette = theme.palette.compactMap { PlatformColor(hex: $0) }
         if palette.count == 16 {
             terminalView.installColors(palette.map(\.swiftTermColor))
         }
-        if let fg = NSColor(hex: theme.foreground) { terminalView.nativeForegroundColor = fg }
-        if let bg = NSColor(hex: theme.background) {
+        if let fg = PlatformColor(hex: theme.foreground) { terminalView.nativeForegroundColor = fg }
+        if let bg = PlatformColor(hex: theme.background) {
             terminalView.nativeBackgroundColor = bg
+            #if os(macOS)
             terminalView.layer?.backgroundColor = bg.cgColor
+            #else
+            terminalView.backgroundColor = bg
+            #endif
         }
-        if let cursor = NSColor(hex: theme.cursor) { terminalView.caretColor = cursor }
-        terminalView.caretTextColor = theme.cursorText.flatMap { NSColor(hex: $0) }
-        if let selection = NSColor(hex: theme.selectionBackground) {
+        if let cursor = PlatformColor(hex: theme.cursor) { terminalView.caretColor = cursor }
+        terminalView.caretTextColor = theme.cursorText.flatMap { PlatformColor(hex: $0) }
+        if let selection = PlatformColor(hex: theme.selectionBackground) {
             terminalView.selectedTextBackgroundColor = selection
         }
         terminalView.setCursorStyle(appearance.cursorStyle)
@@ -93,20 +105,25 @@ final class SwiftTermSurface: NSObject, TerminalSurface, TerminalViewDelegate {
     nonisolated func rangeChanged(source: TerminalView, startY: Int, endY: Int) {}
     nonisolated func iTermContent(source: TerminalView, content: ArraySlice<UInt8>) {}
     nonisolated func bell(source: TerminalView) {
+        #if os(macOS)
         MainActor.assumeIsolated { NSSound.beep() }
+        #else
+        MainActor.assumeIsolated { UIImpactFeedbackGenerator(style: .light).impactOccurred() }
+        #endif
     }
 
     nonisolated func requestOpenLink(source: TerminalView, link: String, params: [String: String]) {
         guard let url = URL(string: link), ["http", "https"].contains(url.scheme) else { return }
+        #if os(macOS)
         MainActor.assumeIsolated { _ = NSWorkspace.shared.open(url) }
+        #else
+        MainActor.assumeIsolated { UIApplication.shared.open(url) }
+        #endif
     }
 
     nonisolated func clipboardCopy(source: TerminalView, content: Data) {
         guard let text = String(data: content, encoding: .utf8) else { return }
-        MainActor.assumeIsolated {
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(text, forType: .string)
-        }
+        MainActor.assumeIsolated { Clipboard.copy(text) }
     }
 }
 
@@ -114,25 +131,15 @@ final class SwiftTermSurface: NSObject, TerminalSurface, TerminalViewDelegate {
 private final class FocusReportingTerminalView: TerminalView {
     var onMouseDown: (() -> Void)?
 
+    #if os(macOS)
     override func mouseDown(with event: NSEvent) {
         onMouseDown?()
         super.mouseDown(with: event)
     }
-}
-
-extension NSColor {
-    /// `#rrggbb` in sRGB.
-    convenience init?(hex: String) {
-        let s = hex.hasPrefix("#") ? String(hex.dropFirst()) : hex
-        guard s.count == 6, let v = UInt32(s, radix: 16) else { return nil }
-        self.init(
-            srgbRed: CGFloat((v >> 16) & 0xff) / 255, green: CGFloat((v >> 8) & 0xff) / 255,
-            blue: CGFloat(v & 0xff) / 255, alpha: 1)
+    #else
+    override func becomeFirstResponder() -> Bool {
+        onMouseDown?()
+        return super.becomeFirstResponder()
     }
-
-    var swiftTermColor: SwiftTerm.Color {
-        let c = usingColorSpace(.sRGB) ?? self
-        func channel(_ v: CGFloat) -> UInt16 { UInt16((v * 65535).rounded()) }
-        return SwiftTerm.Color(red: channel(c.redComponent), green: channel(c.greenComponent), blue: channel(c.blueComponent))
-    }
+    #endif
 }

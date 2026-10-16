@@ -1,5 +1,9 @@
-import AppKit
 import SwiftTerm
+#if os(macOS)
+import AppKit
+#else
+import UIKit
+#endif
 
 /// Per-device appearance (fonts differ between machines, so these do not sync).
 struct Appearance: Equatable {
@@ -36,10 +40,16 @@ struct Appearance: Equatable {
     }
 
     /// Empty name means the system monospaced font (SF Mono).
-    var font: NSFont {
+    var font: PlatformFont {
         let size = CGFloat(min(max(fontSize, 8), 40))
+        #if os(macOS)
         if !fontName.isEmpty, let font = NSFont(name: fontName, size: size) { return font }
-        return NSFont.monospacedSystemFont(ofSize: size, weight: .regular)
+        #else
+        if !fontName.isEmpty, UIFont.familyNames.contains(fontName) {
+            return UIFont(descriptor: UIFontDescriptor(fontAttributes: [.family: fontName]), size: size)
+        }
+        #endif
+        return PlatformFont.monospacedSystemFont(ofSize: size, weight: .regular)
     }
 
     var cursorStyle: CursorStyle {
@@ -55,9 +65,19 @@ struct Appearance: Equatable {
 
     /// Installed fixed-pitch font families, for the font picker.
     static var monospacedFamilies: [String] {
+        #if os(macOS)
         NSFontManager.shared.availableFontFamilies.filter { family in
             guard let font = NSFont(name: family, size: 12) else { return false }
             return font.isFixedPitch || family.localizedCaseInsensitiveContains("mono")
         }
+        #else
+        UIFont.familyNames.sorted().filter { family in
+            guard let name = UIFont.fontNames(forFamilyName: family).first,
+                let font = UIFont(name: name, size: 12)
+            else { return false }
+            return font.fontDescriptor.symbolicTraits.contains(.traitMonoSpace)
+                || family.localizedCaseInsensitiveContains("mono")
+        }
+        #endif
     }
 }

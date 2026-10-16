@@ -59,13 +59,17 @@ struct HostEditor: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
+        EditorSheet(
+            title: isNew ? "New Host" : "Edit Host", confirmTitle: isNew ? "Add" : "Save", canConfirm: isValid,
+            width: 500, height: 680, onConfirm: save
+        ) {
             Form {
                 Section {
                     TextField("Label", text: $label, prompt: Text(hostname.isEmpty ? "My Server" : hostname))
                     TextField("Hostname", text: $hostname, prompt: Text("example.com or 192.168.1.10"))
-                    TextField("Port", text: $port)
-                    TextField("Username", text: $username)
+                        .technicalInput()
+                    TextField("Port", text: $port).numericInput()
+                    TextField("Username", text: $username).technicalInput()
                 }
                 Section("Authentication") {
                     Picker("Method", selection: $auth) {
@@ -92,7 +96,7 @@ struct HostEditor: View {
                             }
                         }
                         if app.keys.isEmpty {
-                            Text("Import a key in the Keys window first.").font(.caption).foregroundStyle(.secondary)
+                            Text("Add a key under Keys first.").font(.caption).foregroundStyle(.secondary)
                         }
                     case .keyboardInteractive:
                         Text("The server's prompts (password, one-time codes) are shown when connecting.")
@@ -151,23 +155,13 @@ struct HostEditor: View {
                     }
                 }
                 Section("Advanced") {
-                    TextField("Keepalive (seconds)", text: $keepalive)
-                    TextField("Terminal type", text: $term)
+                    TextField("Keepalive (seconds)", text: $keepalive).numericInput()
+                    TextField("Terminal type", text: $term).technicalInput()
                     TextField("Startup command", text: $startupCommand, prompt: Text("Optional, e.g. tmux attach"))
+                        .technicalInput()
                 }
             }
-            .formStyle(.grouped)
-
-            HStack {
-                Spacer()
-                Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
-                Button(isNew ? "Add" : "Save", action: save)
-                    .keyboardShortcut(.defaultAction)
-                    .disabled(!isValid)
-            }
-            .padding()
         }
-        .frame(width: 500, height: 680)
         .sheet(item: $editingForward) { forward in
             ForwardEditor(forward: forward) { edited in
                 if let index = forwards.firstIndex(where: { $0.id == edited.id }) {
@@ -273,7 +267,7 @@ private struct ForwardEditor: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
+        EditorSheet(title: "Port Forward", confirmTitle: "Save", canConfirm: isValid, onConfirm: save) {
             Form {
                 Picker("Type", selection: $kind) {
                     Text("Local (-L)").tag(ForwardKind.local)
@@ -282,30 +276,26 @@ private struct ForwardEditor: View {
                 }
                 .pickerStyle(.segmented)
                 Text(explanation).font(.caption).foregroundStyle(.secondary)
-                TextField(kind == .remote ? "Server listens on" : "Listen on", text: $bindHost)
-                TextField("Port", text: $bindPort)
+                TextField(kind == .remote ? "Server listens on" : "Listen on", text: $bindHost).technicalInput()
+                TextField("Port", text: $bindPort).numericInput()
                 if kind != .dynamic {
-                    TextField(kind == .local ? "Destination (from the server)" : "Destination (from this Mac)", text: $targetHost)
-                    TextField("Destination port", text: $targetPort)
+                    TextField(
+                        kind == .local ? "Destination (from the server)" : "Destination (from \(Device.thisDevice))",
+                        text: $targetHost
+                    )
+                    .technicalInput()
+                    TextField("Destination port", text: $targetPort).numericInput()
                 }
                 Toggle("Start when connecting", isOn: $autoStart)
             }
-            .formStyle(.grouped)
-            HStack {
-                Spacer()
-                Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
-                Button("Save", action: save).keyboardShortcut(.defaultAction).disabled(!isValid)
-            }
-            .padding()
         }
-        .frame(width: 440, height: 400)
     }
 
-    private var explanation: String {
+    @MainActor private var explanation: String {
         switch kind {
-        case .local: "Connections to this Mac are carried to the destination as seen from the server, e.g. a database only the server can reach."
-        case .remote: "The server listens and carries connections back to a destination reachable from this Mac."
-        case .dynamic: "A SOCKS5 proxy on this Mac; apps using it browse from the server's network."
+        case .local: "Connections to \(Device.thisDevice) are carried to the destination as seen from the server, e.g. a database only the server can reach."
+        case .remote: "The server listens and carries connections back to a destination reachable from \(Device.thisDevice)."
+        case .dynamic: "A SOCKS5 proxy on \(Device.thisDevice); apps using it browse from the server's network."
         }
     }
 

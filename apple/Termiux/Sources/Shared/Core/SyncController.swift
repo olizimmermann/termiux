@@ -1,5 +1,9 @@
-import AppKit
 import CoreImage.CIFilterBuiltins
+#if os(macOS)
+import AppKit
+#else
+import UIKit
+#endif
 import Observation
 import TermiuxCore
 
@@ -32,7 +36,7 @@ final class SyncController {
             MainActor.assumeIsolated { self?.syncSoon(delay: 0) }
         }
         activeObserver = NotificationCenter.default.addObserver(
-            forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main
+            forName: Self.didBecomeActive, object: nil, queue: .main
         ) { [weak self] _ in
             MainActor.assumeIsolated { self?.syncSoon(delay: 0) }
         }
@@ -47,27 +51,8 @@ final class SyncController {
 
     // MARK: setup
 
-    /// Asks for the sync folder, suggesting iCloud Drive.
-    func chooseFolder() -> URL? {
-        let panel = NSOpenPanel()
-        panel.message = "Choose a folder that syncs between your devices, e.g. in iCloud Drive or Dropbox."
-        panel.prompt = "Use Folder"
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.canCreateDirectories = true
-        let iCloud = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Mobile Documents/com~apple~CloudDocs")
-        if FileManager.default.fileExists(atPath: iCloud.path) {
-            let suggested = iCloud.appendingPathComponent("Termiux")
-            try? FileManager.default.createDirectory(at: suggested, withIntermediateDirectories: true)
-            panel.directoryURL = suggested
-        }
-        guard panel.runModal() == .OK, let url = panel.url else { return nil }
-        return url
-    }
-
     func setFolder(_ url: URL) throws {
-        let bookmark = try url.bookmarkData(options: .withSecurityScope, includingResourceValuesForKeys: nil, relativeTo: nil)
+        let bookmark = try url.bookmarkData(options: Self.bookmarkCreation, includingResourceValuesForKeys: nil, relativeTo: nil)
         UserDefaults.standard.set(bookmark, forKey: Self.bookmarkKey)
         folder = url
     }
@@ -136,23 +121,31 @@ final class SyncController {
         }
     }
 
+    #if os(macOS)
+    private static let didBecomeActive = NSApplication.didBecomeActiveNotification
+    private static let bookmarkCreation: URL.BookmarkCreationOptions = .withSecurityScope
+    private static let bookmarkResolution: URL.BookmarkResolutionOptions = .withSecurityScope
+    #else
+    private static let didBecomeActive = UIApplication.didBecomeActiveNotification
+    // iOS bookmarks to picked folders are implicitly security-scoped.
+    private static let bookmarkCreation: URL.BookmarkCreationOptions = []
+    private static let bookmarkResolution: URL.BookmarkResolutionOptions = []
+    #endif
+
     private static func resolveBookmark() -> URL? {
         guard let data = UserDefaults.standard.data(forKey: bookmarkKey) else { return nil }
         var stale = false
-        return try? URL(resolvingBookmarkData: data, options: .withSecurityScope, relativeTo: nil, bookmarkDataIsStale: &stale)
+        return try? URL(resolvingBookmarkData: data, options: bookmarkResolution, relativeTo: nil, bookmarkDataIsStale: &stale)
     }
 
     /// QR code image of a sync code, for scanning on the phone.
-    static func qrCode(for text: String, size: CGFloat = 180) -> NSImage? {
+    static func qrCode(for text: String, size: CGFloat = 180) -> CGImage? {
         let filter = CIFilter.qrCodeGenerator()
         filter.message = Data(text.utf8)
         filter.correctionLevel = "M"
         guard let output = filter.outputImage else { return nil }
         let scale = size / output.extent.width
         let scaled = output.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
-        let rep = NSCIImageRep(ciImage: scaled)
-        let image = NSImage(size: rep.size)
-        image.addRepresentation(rep)
-        return image
+        return CIContext().createCGImage(scaled, from: scaled.extent)
     }
 }

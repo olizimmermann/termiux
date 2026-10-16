@@ -3,6 +3,11 @@ import SwiftUI
 @main
 struct TermiuxApp: App {
     @State private var app = AppModel()
+    private let prompts = ModalPrompts()
+
+    init() {
+        Prompts.presenter = prompts
+    }
 
     var body: some Scene {
         WindowGroup {

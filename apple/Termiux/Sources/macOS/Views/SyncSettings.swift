@@ -110,37 +110,6 @@ struct SyncSettingsView: View {
     }
 }
 
-private struct CodeItem: Identifiable {
-    let code: String
-    var id: String { code }
-}
-
-private struct SyncCodeSheet: View {
-    @Environment(\.dismiss) private var dismiss
-    let code: String
-
-    var body: some View {
-        VStack(spacing: 16) {
-            Text("Sync Code").font(.title2.bold())
-            Text("Enter or scan this code on your other devices. Keep it secret, and store a copy in your password manager: without it, a new device cannot read your synced data.")
-                .multilineTextAlignment(.center).foregroundStyle(.secondary)
-            if let qr = SyncController.qrCode(for: code) {
-                Image(nsImage: qr).interpolation(.none)
-            }
-            Text(code).font(.system(.body, design: .monospaced)).textSelection(.enabled).multilineTextAlignment(.center)
-            HStack {
-                Button("Copy") {
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(code, forType: .string)
-                }
-                Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
-            }
-        }
-        .padding(24)
-        .frame(width: 460)
-    }
-}
-
 private struct JoinSheet: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(AppModel.self) private var app
@@ -173,5 +142,26 @@ private struct JoinSheet: View {
             .padding()
         }
         .frame(width: 480, height: 330)
+    }
+}
+
+extension SyncController {
+    /// Asks for the sync folder, suggesting iCloud Drive.
+    func chooseFolder() -> URL? {
+        let panel = NSOpenPanel()
+        panel.message = "Choose a folder that syncs between your devices, e.g. in iCloud Drive or Dropbox."
+        panel.prompt = "Use Folder"
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        let iCloud = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Mobile Documents/com~apple~CloudDocs")
+        if FileManager.default.fileExists(atPath: iCloud.path) {
+            let suggested = iCloud.appendingPathComponent("Termiux")
+            try? FileManager.default.createDirectory(at: suggested, withIntermediateDirectories: true)
+            panel.directoryURL = suggested
+        }
+        guard panel.runModal() == .OK, let url = panel.url else { return nil }
+        return url
     }
 }
