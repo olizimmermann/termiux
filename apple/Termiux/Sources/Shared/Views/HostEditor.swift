@@ -312,3 +312,20 @@ private struct ForwardEditor: View {
         dismiss()
     }
 }
+
+extension HostRecord: @retroactive Identifiable {
+    /// A blank record for the "new host" sheet; each call is a distinct sheet item.
+    static var new: HostRecord {
+        HostRecord(
+            id: "", label: "", groupId: nil, hostname: "", port: 22, username: Self.defaultUsername,
+            auth: .password(saved: false), keepaliveSecs: 30, term: "xterm-256color", startupCommand: nil,
+            themeId: nil, jumpHostIds: [], forwards: [])
+    }
+
+    #if os(macOS)
+    private static var defaultUsername: String { NSUserName() }
+    #else
+    private static var defaultUsername: String { "" }
+    #endif
+}
+

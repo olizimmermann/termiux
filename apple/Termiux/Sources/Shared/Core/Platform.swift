@@ -87,6 +87,7 @@ struct EditorSheet<Content: View>: View {
     @Environment(\.dismiss) private var dismiss
     let title: String
     let confirmTitle: String
+    var cancelTitle = "Cancel"
     var canConfirm = true
     var width: CGFloat = 440
     var height: CGFloat = 400
@@ -99,7 +100,7 @@ struct EditorSheet<Content: View>: View {
             content.formStyle(.grouped)
             HStack {
                 Spacer()
-                Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
+                Button(cancelTitle) { dismiss() }.keyboardShortcut(.cancelAction)
                 Button(confirmTitle, action: onConfirm).keyboardShortcut(.defaultAction).disabled(!canConfirm)
             }
             .padding()
@@ -111,7 +112,7 @@ struct EditorSheet<Content: View>: View {
                 .navigationTitle(title)
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
-                    ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                    ToolbarItem(placement: .cancellationAction) { Button(cancelTitle) { dismiss() } }
                     ToolbarItem(placement: .confirmationAction) {
                         Button(confirmTitle, action: onConfirm).disabled(!canConfirm)
                     }

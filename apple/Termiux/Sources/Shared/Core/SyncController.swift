@@ -52,6 +52,9 @@ final class SyncController {
     // MARK: setup
 
     func setFolder(_ url: URL) throws {
+        // Folders picked on iOS are only reachable while their security scope is open.
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
         let bookmark = try url.bookmarkData(options: Self.bookmarkCreation, includingResourceValuesForKeys: nil, relativeTo: nil)
         UserDefaults.standard.set(bookmark, forKey: Self.bookmarkKey)
         folder = url
@@ -110,6 +113,7 @@ final class SyncController {
         defer { syncing = false }
         let scoped = folder.startAccessingSecurityScopedResource()
         defer { if scoped { folder.stopAccessingSecurityScopedResource() } }
+        await Self.downloadPlaceholders(in: folder)
         do {
             let report = try await core.syncFolder(folder: folder.path)
             lastReport = report
@@ -131,6 +135,21 @@ final class SyncController {
     private static let bookmarkCreation: URL.BookmarkCreationOptions = []
     private static let bookmarkResolution: URL.BookmarkResolutionOptions = []
     #endif
+
+    /// iCloud Drive can leave other devices' files in the cloud (as `.name.icloud` placeholders)
+    /// until something asks for them; fetch those before syncing, waiting a few seconds at most.
+    private static func downloadPlaceholders(in folder: URL) async {
+        let fm = FileManager.default
+        guard let names = try? fm.contentsOfDirectory(atPath: folder.path) else { return }
+        var pending: [URL] = []
+        for name in names where name.hasPrefix(".") && name.hasSuffix(".termiux-sync.icloud") {
+            let real = folder.appendingPathComponent(String(name.dropFirst().dropLast(".icloud".count)))
+            if (try? fm.startDownloadingUbiquitousItem(at: real)) != nil { pending.append(real) }
+        }
+        for _ in 0..<20 where pending.contains(where: { !fm.fileExists(atPath: $0.path) }) {
+            try? await Task.sleep(for: .milliseconds(250))
+        }
+    }
 
     private static func resolveBookmark() -> URL? {
         guard let data = UserDefaults.standard.data(forKey: bookmarkKey) else { return nil }

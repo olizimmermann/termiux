@@ -3,6 +3,7 @@ options:
   bundleIdPrefix: com.ozimmermann
   deploymentTarget:
     macOS: "14.0"
+    iOS: "17.0"
   createIntermediateGroups: true
 packages:
   TermiuxCore:
@@ -45,6 +46,34 @@ targets:
         CODE_SIGN_ENTITLEMENTS: Termiux/Config/AppStore.entitlements
         PRODUCT_NAME: Termiux AppStore
         SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) SANDBOXED"
+  # iPhone and iPad.
+  TermiuxMobile:
+    type: application
+    platform: iOS
+    sources: [Termiux/Sources/Shared, Termiux/Sources/iOS]
+    dependencies:
+      - package: TermiuxCore
+      - package: SwiftTerm
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.ozimmermann.termiux
+        PRODUCT_NAME: Termiux
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        SWIFT_VERSION: "6.0"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        # The Rust core ships arm64 simulator slices only.
+        "EXCLUDED_ARCHS[sdk=iphonesimulator*]": x86_64
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: Termiux
+        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.developer-tools
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
+        INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone: "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
+        INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad: "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
+        INFOPLIST_KEY_NSCameraUsageDescription: "Scan the sync code shown on your other device."
+        INFOPLIST_KEY_NSFaceIDUsageDescription: "Unlock SSH keys stored in the Secure Enclave."
+        INFOPLIST_KEY_NSLocalNetworkUsageDescription: "Connect to SSH servers on your local network."
   TermiuxTests:
     type: bundle.unit-test
     platform: macOS
@@ -69,3 +98,7 @@ schemes:
     build:
       targets:
         TermiuxAppStore: all
+  TermiuxMobile:
+    build:
+      targets:
+        TermiuxMobile: all

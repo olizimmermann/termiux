@@ -21,7 +21,11 @@ struct ForwardsButton: View {
             .buttonStyle(.plain)
             .help("Port forwards")
             .popover(isPresented: $showing, arrowEdge: .bottom) {
-                ForwardList(session: session).frame(width: 380)
+                ForwardList(session: session)
+                    .frame(width: 380)
+                    #if os(iOS)
+                    .presentationCompactAdaptation(.popover)
+                    #endif
             }
             .padding(8)
             .task(id: showing) { await session.refreshForwards() }

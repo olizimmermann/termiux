@@ -99,16 +99,6 @@ struct ContentView: View {
     }
 }
 
-extension HostRecord: @retroactive Identifiable {
-    /// A blank record for the "new host" sheet; each call is a distinct sheet item.
-    static var new: HostRecord {
-        HostRecord(
-            id: "", label: "", groupId: nil, hostname: "", port: 22, username: NSUserName(),
-            auth: .password(saved: false), keepaliveSecs: 30, term: "xterm-256color", startupCommand: nil,
-            themeId: nil, jumpHostIds: [], forwards: [])
-    }
-}
-
 private struct HostRow: View {
     let host: HostRecord
 

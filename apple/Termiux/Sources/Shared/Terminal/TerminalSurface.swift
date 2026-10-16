@@ -23,6 +23,8 @@ protocol TerminalSurface: AnyObject {
     func feed(text: String)
     func apply(theme: ThemeRecord, appearance: Appearance)
     func focus()
+    /// Pastes the clipboard (bracketed when the remote program asked for it).
+    func paste()
 }
 
 final class SwiftTermSurface: NSObject, TerminalSurface, TerminalViewDelegate {
@@ -60,6 +62,10 @@ final class SwiftTermSurface: NSObject, TerminalSurface, TerminalViewDelegate {
         #else
         _ = terminalView.becomeFirstResponder()
         #endif
+    }
+
+    func paste() {
+        terminalView.paste(self)
     }
 
     func apply(theme: ThemeRecord, appearance: Appearance) {

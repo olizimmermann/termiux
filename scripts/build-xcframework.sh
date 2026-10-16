@@ -5,6 +5,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 export DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}"
+# Match the app's deployment targets; otherwise C code (ring, SQLite) targets the SDK's version.
+export MACOSX_DEPLOYMENT_TARGET=14.0 IPHONEOS_DEPLOYMENT_TARGET=17.0
 
 PROFILE="${PROFILE:-release}"
 PLATFORMS="${PLATFORMS:-macos ios}"
