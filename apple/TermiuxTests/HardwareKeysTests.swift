@@ -10,7 +10,14 @@ final class HardwareKeysTests: XCTestCase {
         try XCTSkipUnless(HardwareKeys.secureEnclaveAvailable, "no Secure Enclave")
         let secrets = KeychainSecretStore(service: "com.ozimmermann.termiux.tests")
         let keys = HardwareKeys(secrets: secrets)
-        let (tag, publicKey) = try keys.createSecureEnclaveKey(label: "test", requireUserPresence: false)
+        let created: (tag: String, publicKey: String)
+        do {
+            created = try keys.createSecureEnclaveKey(label: "test", requireUserPresence: false)
+        } catch let error as NSError where error.code == Int(errSecInteractionNotAllowed) {
+            // Keys marked "when unlocked" cannot be created while the screen is locked.
+            throw XCTSkip("Mac is locked")
+        }
+        let (tag, publicKey) = created
         defer { keys.deleteSecureEnclaveKey(tag: tag) }
         XCTAssertTrue(publicKey.hasPrefix("ecdsa-sha2-nistp256 "), publicKey)
         XCTAssertTrue(publicKey.hasSuffix(" test"))
