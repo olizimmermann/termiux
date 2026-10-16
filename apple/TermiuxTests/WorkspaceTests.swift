@@ -16,7 +16,7 @@ final class WorkspaceTests: XCTestCase {
 
     override func setUp() async throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        core = try TermiuxCore.open(dataDir: dir.path, secrets: NoSecrets())
+        core = try TermiuxCore.open(dataDir: dir.path, secrets: NoSecrets(), platform: nil, agentSocket: nil)
     }
 
     private func session() -> TerminalSessionModel {

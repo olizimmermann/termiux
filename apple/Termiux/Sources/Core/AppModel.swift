@@ -9,6 +9,8 @@ enum BuildFlavor {
     static let sandboxed = false
     #endif
     static var hasLocalShell: Bool { !sandboxed }
+    /// Sandboxed apps cannot reach the ssh-agent socket.
+    static var hasAgent: Bool { !sandboxed }
 }
 
 /// App-wide state: the core, saved hosts, keys and themes, and open tabs.
@@ -16,6 +18,7 @@ enum BuildFlavor {
 @Observable
 final class AppModel {
     let core: TermiuxCore?
+    let hardwareKeys: HardwareKeys
     let startupError: String?
     private(set) var hosts: [HostRecord] = []
     private(set) var keys: [KeyRecord] = []
@@ -30,11 +33,16 @@ final class AppModel {
     @ObservationIgnored private var defaultsObserver: NSObjectProtocol?
 
     init() {
+        let secrets = KeychainSecretStore()
+        hardwareKeys = HardwareKeys(secrets: secrets)
         do {
             let support = try FileManager.default.url(
                 for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
             let dir = support.appendingPathComponent(Bundle.main.bundleIdentifier ?? "Termiux", isDirectory: true)
-            core = try TermiuxCore.open(dataDir: dir.path, secrets: KeychainSecretStore())
+            let agentSocket = BuildFlavor.sandboxed ? nil : UserDefaults.standard.string(forKey: "agent.socket")
+            core = try TermiuxCore.open(
+                dataDir: dir.path, secrets: secrets, platform: hardwareKeys,
+                agentSocket: agentSocket.map { NSString(string: $0).expandingTildeInPath })
             startupError = nil
         } catch {
             core = nil
@@ -101,6 +109,9 @@ final class AppModel {
     func delete(key: KeyRecord) {
         do {
             try core?.deleteKey(id: key.id)
+            if case .secureEnclave(let tag) = key.platform {
+                hardwareKeys.deleteSecureEnclaveKey(tag: tag)
+            }
             reload()
         } catch {
             errorMessage = error.localizedDescription

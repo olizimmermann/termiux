@@ -5,7 +5,7 @@ struct HostEditor: View {
     @Environment(AppModel.self) private var app
     @Environment(\.dismiss) private var dismiss
 
-    private enum AuthChoice: Hashable { case password, key, keyboardInteractive }
+    private enum AuthChoice: Hashable { case password, key, keyboardInteractive, agent }
 
     let original: HostRecord
     @State private var label: String
@@ -41,6 +41,9 @@ struct HostEditor: View {
         case .keyboardInteractive:
             _auth = State(initialValue: .keyboardInteractive)
             _keyId = State(initialValue: "")
+        case .agent:
+            _auth = State(initialValue: .agent)
+            _keyId = State(initialValue: "")
         }
     }
 
@@ -64,6 +67,9 @@ struct HostEditor: View {
                         Text("Password").tag(AuthChoice.password)
                         Text("Key").tag(AuthChoice.key)
                         Text("Keyboard-interactive").tag(AuthChoice.keyboardInteractive)
+                        if BuildFlavor.hasAgent || auth == .agent {
+                            Text("SSH agent").tag(AuthChoice.agent)
+                        }
                     }
                     switch auth {
                     case .password:
@@ -85,6 +91,10 @@ struct HostEditor: View {
                         }
                     case .keyboardInteractive:
                         Text("The server's prompts (password, one-time codes) are shown when connecting.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    case .agent:
+                        Text("Uses the keys of your running ssh-agent (or the socket set in Settings › SSH).")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -128,6 +138,7 @@ struct HostEditor: View {
         case .password: hostAuth = .password(saved: hasSavedPassword)
         case .key: hostAuth = .key(keyId: keyId)
         case .keyboardInteractive: hostAuth = .keyboardInteractive
+        case .agent: hostAuth = .agent
         }
         let passwordChange: PasswordChange =
             if auth != .password { .keep }

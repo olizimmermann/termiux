@@ -8,6 +8,9 @@
 	<true/>
 	<key>com.apple.security.files.user-selected.read-only</key>
 	<true/>
+	<!-- PIV smartcards via CryptoTokenKit -->
+	<key>com.apple.security.smartcard</key>
+	<true/>
 	<!-- FIDO2 security keys over USB HID -->
 	<key>com.apple.security.device.usb</key>
 	<true/>

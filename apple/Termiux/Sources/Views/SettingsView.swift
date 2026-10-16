@@ -8,6 +8,9 @@ struct SettingsView: View {
         TabView {
             AppearanceSettings().tabItem { Label("Appearance", systemImage: "textformat") }
             ThemeSettings().tabItem { Label("Themes", systemImage: "paintpalette") }
+            if BuildFlavor.hasAgent {
+                SSHSettings().tabItem { Label("SSH", systemImage: "network") }
+            }
         }
         .frame(width: 560, height: 440)
     }
@@ -177,4 +180,20 @@ private struct ThemePreview: View {
 
 extension Array {
     subscript(safe index: Int) -> Element? { indices.contains(index) ? self[index] : nil }
+}
+
+private struct SSHSettings: View {
+    @AppStorage("agent.socket") private var agentSocket = ""
+
+    var body: some View {
+        Form {
+            TextField("ssh-agent socket", text: $agentSocket, prompt: Text("Default ($SSH_AUTH_SOCK)"))
+            Text("""
+                Set this to use another agent, e.g. 1Password                 (~/Library/Group Containers/2BUA8C4S2C.com.1password/t/agent.sock) or Secretive.                 Takes effect after restarting Termiux.
+                """)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .formStyle(.grouped)
+    }
 }

@@ -26,6 +26,7 @@ struct ContentView: View {
                             .contextMenu {
                                 Button("Connect") { app.connect(host) }
                                 Button("Edit…") { editing = host }
+                                Button("Install Public Key…") { showingKeys = true }
                                 Divider()
                                 Button("Delete", role: .destructive) { app.delete(host: host) }
                             }

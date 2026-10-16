@@ -391,6 +391,8 @@ pub struct KeyRecord {
     pub label: String,
     pub public_key: String,
     pub kind: KeyKind,
+    /// Set for hardware-bound keys.
+    pub platform: Option<PlatformKeyRef>,
 }
 
 impl From<&model::Key> for KeyRecord {
@@ -401,7 +403,14 @@ impl From<&model::Key> for KeyRecord {
             model::KeyStorage::Piv { .. } => KeyKind::Piv,
             model::KeyStorage::SecureEnclave { .. } => KeyKind::SecureEnclave,
         };
-        Self { id: k.id.to_string(), label: k.label.clone(), public_key: k.public_key.clone(), kind }
+        let platform = match &k.storage {
+            model::KeyStorage::Piv { token_id, slot } => {
+                Some(PlatformKeyRef::Piv { token_id: token_id.clone(), slot: slot.clone() })
+            }
+            model::KeyStorage::SecureEnclave { tag } => Some(PlatformKeyRef::SecureEnclave { tag: tag.clone() }),
+            _ => None,
+        };
+        Self { id: k.id.to_string(), label: k.label.clone(), public_key: k.public_key.clone(), kind, platform }
     }
 }
 
