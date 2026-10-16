@@ -96,7 +96,7 @@ extension HostRecord: @retroactive Identifiable {
         HostRecord(
             id: "", label: "", groupId: nil, hostname: "", port: 22, username: NSUserName(),
             auth: .password(saved: false), keepaliveSecs: 30, term: "xterm-256color", startupCommand: nil,
-            themeId: nil)
+            themeId: nil, jumpHostIds: [], forwards: [])
     }
 }
 

@@ -20,6 +20,9 @@ struct HostEditor: View {
     @State private var term: String
     @State private var startupCommand: String
     @State private var themeID: String
+    @State private var jumpHostIDs: [String]
+    @State private var forwards: [PortForwardRecord]
+    @State private var editingForward: PortForwardRecord?
 
     init(host: HostRecord) {
         original = host
@@ -31,6 +34,8 @@ struct HostEditor: View {
         _term = State(initialValue: host.term)
         _startupCommand = State(initialValue: host.startupCommand ?? "")
         _themeID = State(initialValue: host.themeId ?? "")
+        _jumpHostIDs = State(initialValue: host.jumpHostIds)
+        _forwards = State(initialValue: host.forwards)
         switch host.auth {
         case .password:
             _auth = State(initialValue: .password)
@@ -99,6 +104,44 @@ struct HostEditor: View {
                             .foregroundStyle(.secondary)
                     }
                 }
+                Section {
+                    ForEach(Array(jumpHostIDs.enumerated()), id: \.offset) { index, id in
+                        HStack {
+                            Text("\(index + 1).").foregroundStyle(.secondary).monospacedDigit()
+                            Text(hostName(id))
+                            Spacer()
+                            Button { jumpHostIDs.remove(at: index) } label: { Image(systemName: "minus.circle") }
+                                .buttonStyle(.borderless)
+                        }
+                    }
+                    Menu("Add Jump Host") {
+                        ForEach(jumpCandidates, id: \.id) { host in
+                            Button(host.label.isEmpty ? host.hostname : host.label) { jumpHostIDs.append(host.id) }
+                        }
+                    }
+                    .disabled(jumpCandidates.isEmpty)
+                } header: {
+                    Text("Jump Hosts")
+                } footer: {
+                    Text("Connects through these hosts in order, like ssh -J. Each uses its own saved login.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Section("Port Forwarding") {
+                    ForEach(forwards, id: \.id) { forward in
+                        HStack {
+                            Text(forward.summary).font(.callout.monospaced())
+                            if forward.autoStart {
+                                Text("auto").font(.caption2).padding(.horizontal, 4).background(.tint.opacity(0.2), in: Capsule())
+                            }
+                            Spacer()
+                            Button { editingForward = forward } label: { Image(systemName: "pencil") }
+                                .buttonStyle(.borderless)
+                            Button { forwards.removeAll { $0.id == forward.id } } label: { Image(systemName: "minus.circle") }
+                                .buttonStyle(.borderless)
+                        }
+                    }
+                    Button("Add Forward…") { editingForward = .new }
+                }
                 Section("Appearance") {
                     Picker("Theme", selection: $themeID) {
                         Text("Default").tag("")
@@ -124,7 +167,26 @@ struct HostEditor: View {
             }
             .padding()
         }
-        .frame(width: 460, height: 620)
+        .frame(width: 500, height: 680)
+        .sheet(item: $editingForward) { forward in
+            ForwardEditor(forward: forward) { edited in
+                if let index = forwards.firstIndex(where: { $0.id == edited.id }) {
+                    forwards[index] = edited
+                } else {
+                    forwards.append(edited)
+                }
+            }
+        }
+    }
+
+    private func hostName(_ id: String) -> String {
+        guard let host = app.hosts.first(where: { $0.id == id }) else { return "Missing host" }
+        return host.label.isEmpty ? host.hostname : host.label
+    }
+
+    /// Other saved hosts not already in the chain.
+    private var jumpCandidates: [HostRecord] {
+        app.hosts.filter { $0.id != original.id && !jumpHostIDs.contains($0.id) }
     }
 
     private var isValid: Bool {
@@ -156,9 +218,107 @@ struct HostEditor: View {
             keepaliveSecs: UInt32(keepalive) ?? 30,
             term: term.trimmingCharacters(in: .whitespaces),
             startupCommand: startupCommand.isEmpty ? nil : startupCommand,
-            themeId: themeID.isEmpty ? nil : themeID)
+            themeId: themeID.isEmpty ? nil : themeID,
+            jumpHostIds: jumpHostIDs,
+            // Temporary ids of new forwards are dropped; the core assigns real ones.
+            forwards: forwards.map { f in
+                var f = f
+                if f.id.hasPrefix("new-") { f.id = "" }
+                return f
+            })
         if app.save(host: host, password: passwordChange) != nil {
             dismiss()
         }
+    }
+}
+
+extension PortForwardRecord: @retroactive Identifiable {
+    /// Blank local forward; the temporary id lets the sheet tell new from existing ones.
+    static var new: PortForwardRecord {
+        PortForwardRecord(
+            id: "new-" + UUID().uuidString, kind: .local, bindHost: "127.0.0.1", bindPort: 8080,
+            targetHost: "localhost", targetPort: 80, autoStart: true)
+    }
+
+    var summary: String {
+        let bind = "\(bindHost):\(bindPort)"
+        switch kind {
+        case .local: return "L \(bind) → \(targetHost):\(targetPort)"
+        case .remote: return "R \(bind) → \(targetHost):\(targetPort)"
+        case .dynamic: return "D \(bind) (SOCKS)"
+        }
+    }
+}
+
+private struct ForwardEditor: View {
+    @Environment(\.dismiss) private var dismiss
+    let original: PortForwardRecord
+    let onSave: (PortForwardRecord) -> Void
+    @State private var kind: ForwardKind
+    @State private var bindHost: String
+    @State private var bindPort: String
+    @State private var targetHost: String
+    @State private var targetPort: String
+    @State private var autoStart: Bool
+
+    init(forward: PortForwardRecord, onSave: @escaping (PortForwardRecord) -> Void) {
+        original = forward
+        self.onSave = onSave
+        _kind = State(initialValue: forward.kind)
+        _bindHost = State(initialValue: forward.bindHost)
+        _bindPort = State(initialValue: String(forward.bindPort))
+        _targetHost = State(initialValue: forward.targetHost)
+        _targetPort = State(initialValue: String(forward.targetPort))
+        _autoStart = State(initialValue: forward.autoStart)
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Form {
+                Picker("Type", selection: $kind) {
+                    Text("Local (-L)").tag(ForwardKind.local)
+                    Text("Remote (-R)").tag(ForwardKind.remote)
+                    Text("Dynamic SOCKS (-D)").tag(ForwardKind.dynamic)
+                }
+                .pickerStyle(.segmented)
+                Text(explanation).font(.caption).foregroundStyle(.secondary)
+                TextField(kind == .remote ? "Server listens on" : "Listen on", text: $bindHost)
+                TextField("Port", text: $bindPort)
+                if kind != .dynamic {
+                    TextField(kind == .local ? "Destination (from the server)" : "Destination (from this Mac)", text: $targetHost)
+                    TextField("Destination port", text: $targetPort)
+                }
+                Toggle("Start when connecting", isOn: $autoStart)
+            }
+            .formStyle(.grouped)
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
+                Button("Save", action: save).keyboardShortcut(.defaultAction).disabled(!isValid)
+            }
+            .padding()
+        }
+        .frame(width: 440, height: 400)
+    }
+
+    private var explanation: String {
+        switch kind {
+        case .local: "Connections to this Mac are carried to the destination as seen from the server, e.g. a database only the server can reach."
+        case .remote: "The server listens and carries connections back to a destination reachable from this Mac."
+        case .dynamic: "A SOCKS5 proxy on this Mac; apps using it browse from the server's network."
+        }
+    }
+
+    private var isValid: Bool {
+        guard UInt16(bindPort) != nil, !bindHost.isEmpty else { return false }
+        return kind == .dynamic || (!targetHost.isEmpty && UInt16(targetPort).map { $0 > 0 } == true)
+    }
+
+    private func save() {
+        onSave(PortForwardRecord(
+            id: original.id, kind: kind, bindHost: bindHost,
+            bindPort: UInt16(bindPort) ?? 0, targetHost: kind == .dynamic ? "" : targetHost,
+            targetPort: kind == .dynamic ? 0 : UInt16(targetPort) ?? 0, autoStart: autoStart))
+        dismiss()
     }
 }

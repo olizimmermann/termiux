@@ -13,6 +13,7 @@ struct TerminalPane: View {
         TerminalViewHost(view: session.surface.view)
             .background(Color(nsColor: NSColor(hex: app.theme(for: session)?.background ?? "") ?? .black))
             .overlay { overlay }
+            .overlay(alignment: .topTrailing) { ForwardsButton(session: session) }
             .overlay {
                 // Dim unfocused panes when the tab is split.
                 if !isFocused && tab.sessions.count > 1 {

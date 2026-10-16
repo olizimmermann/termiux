@@ -15,6 +15,7 @@ Licensed under GPL-3.0-or-later.
 scripts/build-xcframework.sh          # Rust core -> apple/Packages/TermiuxCore (PROFILE=debug PLATFORMS=macos for speed)
 (cd apple && xcodegen generate)       # regenerate Termiux.xcodeproj from project.yml
 (cd core && cargo test --workspace)   # Rust tests (Docker SSH tests: scripts/test-sshd.sh)
+scripts/dev-sshd.sh                   # SSH server on 127.0.0.1:2222 (termiux/termiux) for trying the app
 xcodebuild -project apple/Termiux.xcodeproj -scheme Termiux -skipPackagePluginValidation test
 ```
 

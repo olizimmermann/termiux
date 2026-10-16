@@ -25,6 +25,8 @@ final class TerminalSessionModel: Identifiable {
     private(set) var state: State = .connecting(status: nil)
     /// Title set by the remote program (OSC 0/2), if any.
     private(set) var terminalTitle: String?
+    /// Port forward status of this SSH session.
+    private(set) var forwards: [ForwardStatus] = []
 
     @ObservationIgnored let surface: TerminalSurface
     @ObservationIgnored private let core: TermiuxCore
@@ -91,6 +93,7 @@ final class TerminalSessionModel: Identifiable {
                     }
                     self.session = session
                     self.state = .running
+                    await self.refreshForwards()
                     // Catch up with any resize that happened while connecting.
                     let size = self.surface.dimensions
                     session.resize(cols: UInt32(size.cols), rows: UInt32(size.rows))
@@ -103,6 +106,24 @@ final class TerminalSessionModel: Identifiable {
                 }
             }
         }
+    }
+
+    func refreshForwards() async {
+        guard let session else {
+            forwards = []
+            return
+        }
+        forwards = await session.forwards()
+    }
+
+    func setForward(_ id: String, running: Bool) async {
+        guard let session else { return }
+        if running {
+            try? await session.startForward(id: id)
+        } else {
+            try? await session.stopForward(id: id)
+        }
+        await refreshForwards()
     }
 
     func reconnect() {
@@ -124,6 +145,7 @@ final class TerminalSessionModel: Identifiable {
 
     fileprivate func ended(_ end: SessionEnd) {
         session = nil
+        forwards = []
         if end.reason != .userClosed {
             state = .ended(end)
         }

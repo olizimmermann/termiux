@@ -102,3 +102,24 @@ async fn untrusted_host_key_rejected() {
     .await;
     assert!(matches!(err, Err(SshError::HostKey(HostKeyError::NotTrusted { .. }))));
 }
+
+#[tokio::test]
+#[ignore = "needs docker sshd"]
+async fn local_forward_through_openssh() {
+    use tokio::io::AsyncReadExt;
+    let session = Arc::new(
+        SshSession::connect(
+            &test_host(),
+            Credential::Password { password: "termiux".into(), fallback: None },
+            Arc::new(AcceptAll),
+        )
+        .await
+        .unwrap(),
+    );
+    // Forward to the container's own sshd and expect its banner.
+    let fwd = termiux_ssh::forward::local(session, "127.0.0.1", 0, "127.0.0.1", 2222).await.unwrap();
+    let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", fwd.bound.1)).await.unwrap();
+    let mut banner = [0u8; 7];
+    tokio::time::timeout(Duration::from_secs(5), stream.read_exact(&mut banner)).await.unwrap().unwrap();
+    assert_eq!(&banner, b"SSH-2.0");
+}
