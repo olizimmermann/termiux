@@ -2466,6 +2466,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "termiux-keys"
+version = "0.1.0"
+dependencies = [
+ "rand",
+ "russh",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "termiux-model"
 version = "0.1.0"
 dependencies = [
@@ -2486,7 +2495,9 @@ name = "termiux-session"
 version = "0.1.0"
 dependencies = [
  "russh",
+ "tempfile",
  "termiux-fido",
+ "termiux-keys",
  "termiux-model",
  "termiux-pty",
  "termiux-ssh",
@@ -2502,7 +2513,9 @@ version = "0.1.0"
 dependencies = [
  "rpassword",
  "russh",
+ "tempfile",
  "termiux-fido",
+ "termiux-keys",
  "termiux-model",
  "termiux-store",
  "thiserror 2.0.21",

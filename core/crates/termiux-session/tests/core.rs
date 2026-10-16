@@ -15,7 +15,12 @@ const PLAIN: &str = include_str!("fixtures/ed25519_plain");
 const ENCRYPTED: &str = include_str!("fixtures/ed25519_encrypted");
 
 fn core() -> Core {
-    Core { store: Arc::new(Store::open_in_memory().unwrap()), secrets: Arc::new(MemorySecretStore::default()) }
+    Core {
+        store: Arc::new(Store::open_in_memory().unwrap()),
+        secrets: Arc::new(MemorySecretStore::default()),
+        platform: None,
+        agent_socket: None,
+    }
 }
 
 /// Scripted UI: answers secrets from a queue and records what was asked.
@@ -182,4 +187,37 @@ async fn local_session_reports_exit_and_user_close() {
     let (session, _, ended) = local(&core);
     session.close().await;
     assert_eq!(ended.recv_timeout(Duration::from_secs(10)).unwrap().reason, EndReason::UserClosed);
+}
+
+#[test]
+fn generate_and_export_keys() {
+    let core = core();
+    let key = core.generate_key("work", termiux_keys::KeyType::Ed25519, Some("pw")).unwrap();
+    assert!(key.public_key.starts_with("ssh-ed25519 "));
+    let KeyStorage::Software { passphrase: Some(_), .. } = &key.storage else { panic!("passphrase not kept") };
+
+    // Export without a passphrase decrypts with the stored one.
+    let plain = core.export_private_key(key.id, None).unwrap();
+    let parsed = russh::keys::PrivateKey::from_openssh(&plain).unwrap();
+    assert!(!parsed.is_encrypted());
+    assert_eq!(parsed.public_key().to_openssh().unwrap().split(' ').nth(1), key.public_key.split(' ').nth(1));
+
+    let encrypted = core.export_private_key(key.id, Some("new")).unwrap();
+    assert!(russh::keys::PrivateKey::from_openssh(&encrypted).unwrap().is_encrypted());
+}
+
+#[test]
+fn platform_keys_resolve_to_external_signer() {
+    let core = core();
+    let public =
+        termiux_keys::generate(termiux_keys::KeyType::EcdsaP256, "").unwrap().public_key().to_openssh().unwrap();
+    let key = core.add_platform_key("Touch ID", &public, KeyStorage::SecureEnclave { tag: "t".into() }).unwrap();
+    assert!(key.public_key.ends_with(" Touch ID"));
+    assert!(matches!(core.export_private_key(key.id, None), Err(SessionError::Unsupported(_))));
+
+    let mut host = Host::new("h", "example.com", "me");
+    host.auth = AuthMethod::Key { key_id: key.id };
+    let (_, ui) = ui(&[]);
+    // No platform signer on this "device".
+    assert!(matches!(core.resolve_credential(&host, &ui), Err(SessionError::Unsupported(_))));
 }

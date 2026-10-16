@@ -10,10 +10,12 @@ termiux-store.workspace = true
 termiux-ssh.workspace = true
 termiux-pty.workspace = true
 termiux-fido.workspace = true
+termiux-keys.workspace = true
 russh.workspace = true
 tokio.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+tempfile = "3.27"
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

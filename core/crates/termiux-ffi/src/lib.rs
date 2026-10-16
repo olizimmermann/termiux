@@ -355,7 +355,12 @@ impl TermiuxCore {
         std::fs::create_dir_all(&dir).map_err(failed)?;
         let store = Store::open(dir.join("termiux.sqlite"))?;
         Ok(Arc::new(Self {
-            core: Arc::new(Core { store: Arc::new(store), secrets: Arc::new(SecretStoreAdapter(secrets)) }),
+            core: Arc::new(Core {
+                store: Arc::new(store),
+                secrets: Arc::new(SecretStoreAdapter(secrets)),
+                platform: None,
+                agent_socket: None,
+            }),
         }))
     }
 

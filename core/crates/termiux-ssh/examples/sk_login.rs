@@ -38,9 +38,10 @@ async fn main() {
             let mut host = Host::new("sk", &args[2], &args[4]);
             host.port = args[3].parse().unwrap();
             println!("Touch your security key…");
-            let session = SshSession::connect(&host, Credential::SecurityKey { key, pin }, Arc::new(AcceptAll))
-                .await
-                .expect("login");
+            let session =
+                SshSession::connect(&host, Credential::SecurityKey { key, pin, ask_pin: None }, Arc::new(AcceptAll))
+                    .await
+                    .expect("login");
             println!("Authenticated with security key.");
             session.disconnect().await.unwrap();
         }

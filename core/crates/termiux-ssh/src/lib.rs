@@ -25,6 +25,12 @@ pub enum SshError {
     SecurityKey(#[from] termiux_fido::SkAuthError),
     #[error(transparent)]
     HostKey(#[from] HostKeyError),
+    #[error("signing failed: {0}")]
+    Signer(String),
+    #[error("ssh-agent: {0}")]
+    Agent(String),
+    #[error("ssh-agent has no keys")]
+    AgentEmpty,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -56,9 +62,57 @@ pub enum Credential {
     SecurityKey {
         key: termiux_fido::SkKey,
         pin: Option<String>,
+        ask_pin: Option<termiux_fido::PinPrompt>,
+    },
+    /// Key held outside the core (PIV smartcard, Secure Enclave); the platform signs.
+    External {
+        public_key: PublicKey,
+        signer: Arc<dyn BlobSigner>,
+    },
+    /// Identities offered by a running ssh-agent; `socket` overrides `SSH_AUTH_SOCK`.
+    Agent {
+        socket: Option<std::path::PathBuf>,
     },
     /// Server-driven prompts (OTP codes, PAM conversations, …).
     KeyboardInteractive(Arc<dyn KeyboardInteractiveResponder>),
+}
+
+/// Signs SSH authentication data with a key the core cannot see. Returns the SSH
+/// signature blob (`string algorithm, string signature`). May block (Touch ID, PIN pad).
+pub trait BlobSigner: Send + Sync + 'static {
+    fn sign(&self, data: &[u8]) -> Result<Vec<u8>, String>;
+}
+
+struct BlobSignerAdapter(Arc<dyn BlobSigner>);
+
+impl russh::Signer for BlobSignerAdapter {
+    type Error = SshError;
+
+    fn auth_sign(
+        &mut self,
+        _key: &russh::keys::agent::AgentIdentity,
+        _hash_alg: Option<russh::keys::HashAlg>,
+        mut to_sign: Vec<u8>,
+    ) -> impl Future<Output = Result<Vec<u8>, SshError>> + Send {
+        let signer = self.0.clone();
+        async move {
+            let data = to_sign.clone();
+            let blob = tokio::task::spawn_blocking(move || signer.sign(&data))
+                .await
+                .map_err(|e| SshError::Signer(e.to_string()))?
+                .map_err(SshError::Signer)?;
+            // russh expects the signed buffer with the signature blob appended as an SSH string.
+            to_sign.extend_from_slice(&(blob.len() as u32).to_be_bytes());
+            to_sign.extend_from_slice(&blob);
+            Ok(to_sign)
+        }
+    }
+}
+
+impl From<russh::SendError> for SshError {
+    fn from(_: russh::SendError) -> Self {
+        SshError::Russh(russh::Error::SendError)
+    }
 }
 
 /// Answers keyboard-interactive prompts, typically by asking the user. May block.
@@ -168,10 +222,20 @@ impl SshSession {
                 let key = PrivateKeyWithHashAlg::new(Arc::new(key), hash);
                 handle.authenticate_publickey(&host.username, key).await?
             }
-            Credential::SecurityKey { key, pin } => {
+            Credential::SecurityKey { key, pin, ask_pin } => {
                 let public = key.public_key.clone();
-                let mut signer = termiux_fido::SkSigner { key, pin };
+                let mut signer = termiux_fido::SkSigner { key, pin, ask_pin };
                 handle.authenticate_publickey_with(&host.username, public, None, &mut signer).await?
+            }
+            Credential::External { public_key, signer } => {
+                // RSA hardware keys sign PKCS#1 SHA-512 (rsa-sha2-512); other types ignore this.
+                let hash = public_key.algorithm().is_rsa().then_some(russh::keys::HashAlg::Sha512);
+                let mut signer = BlobSignerAdapter(signer);
+                handle.authenticate_publickey_with(&host.username, public_key, hash, &mut signer).await?
+            }
+            Credential::Agent { socket } => {
+                agent_auth(&mut handle, &host.username, socket).await?.then_some(()).ok_or(SshError::AuthRejected)?;
+                return Ok(Self { handle });
             }
         };
         if !auth.success() {
@@ -241,6 +305,35 @@ impl SshSession {
         Ok(Shell { input: input_tx, user_closed })
     }
 
+    /// Runs a command without a PTY and returns its exit status and combined output.
+    pub async fn exec(&self, command: &str) -> Result<(Option<u32>, Vec<u8>), SshError> {
+        self.exec_with_input(command, None).await
+    }
+
+    /// Like [`exec`](Self::exec), feeding `input` to the command's stdin.
+    pub async fn exec_with_input(
+        &self,
+        command: &str,
+        input: Option<&[u8]>,
+    ) -> Result<(Option<u32>, Vec<u8>), SshError> {
+        let mut channel = self.handle.channel_open_session().await?;
+        channel.exec(true, command).await?;
+        if let Some(input) = input {
+            channel.data(input).await?;
+            channel.eof().await?;
+        }
+        let (mut status, mut output) = (None, Vec::new());
+        while let Some(msg) = channel.wait().await {
+            match msg {
+                ChannelMsg::Data { data } | ChannelMsg::ExtendedData { data, .. } => output.extend_from_slice(&data),
+                ChannelMsg::ExitStatus { exit_status } => status = Some(exit_status),
+                ChannelMsg::Close => break,
+                _ => {}
+            }
+        }
+        Ok((status, output))
+    }
+
     pub fn is_closed(&self) -> bool {
         self.handle.is_closed()
     }
@@ -277,6 +370,36 @@ impl KeyboardInteractiveResponder for PasswordResponder {
         }
         self.fallback.as_ref()?.respond(name, instructions, prompts)
     }
+}
+
+/// Tries each identity offered by the agent until the server accepts one.
+async fn agent_auth<H: client::Handler>(
+    handle: &mut Handle<H>,
+    user: &str,
+    socket: Option<std::path::PathBuf>,
+) -> Result<bool, SshError> {
+    use russh::keys::agent::client::AgentClient;
+    let agent_err = |e: russh::keys::Error| SshError::Agent(e.to_string());
+    let mut agent = match socket {
+        Some(path) => AgentClient::connect_uds(path).await.map_err(agent_err)?,
+        None => AgentClient::connect_env().await.map_err(agent_err)?,
+    };
+    let identities = agent.request_identities().await.map_err(agent_err)?;
+    if identities.is_empty() {
+        return Err(SshError::AgentEmpty);
+    }
+    for identity in identities {
+        let key = identity.public_key().into_owned();
+        let hash = if key.algorithm().is_rsa() { handle.best_supported_rsa_hash().await?.flatten() } else { None };
+        let result = handle
+            .authenticate_publickey_with(user, key, hash, &mut agent)
+            .await
+            .map_err(|e| SshError::Agent(e.to_string()))?;
+        if result.success() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Runs a keyboard-interactive exchange. Returns whether the server accepted it.

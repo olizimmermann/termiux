@@ -9,8 +9,8 @@ use russh::keys::ssh_key::{LineEnding, PrivateKey};
 use termiux_model::{AuthMethod, EndReason, Host, Key, KeyStorage, SecretRef, SessionEnd, now};
 use termiux_pty::{LocalShell, ShellOptions};
 use termiux_ssh::{
-    Credential, HostKeyInfo, KeyboardInteractiveResponder, KnownHostsVerifier, NewHostPrompt, Shell, SshError,
-    SshSession,
+    BlobSigner, Credential, HostKeyInfo, KeyboardInteractiveResponder, KnownHostsVerifier, NewHostPrompt, Shell,
+    SshError, SshSession,
 };
 use termiux_store::{SecretError, SecretStore, Store, StoreError};
 use uuid::Uuid;
@@ -37,6 +37,12 @@ pub enum SessionError {
     Unsupported(&'static str),
     #[error("cancelled")]
     Cancelled,
+    #[error(transparent)]
+    Fido(#[from] termiux_fido::FidoError),
+    #[error(transparent)]
+    Keys(#[from] termiux_keys::KeyError),
+    #[error("installing the key failed: {0}")]
+    InstallFailed(String),
 }
 
 /// Everything the core may need to ask the user while connecting. All methods may block
@@ -71,9 +77,37 @@ pub trait TerminalSink: Send + Sync + 'static {
     fn ended(&self, end: SessionEnd);
 }
 
+/// Signs with keys held by the platform (PIV smartcards, Secure Enclave). Returns the raw
+/// signature: X9.62 DER for ECDSA, PKCS#1 v1.5 SHA-512 for RSA. May block (Touch ID, PIN).
+pub trait PlatformSigner: Send + Sync + 'static {
+    fn sign(&self, storage: &KeyStorage, data: &[u8]) -> Result<Vec<u8>, String>;
+}
+
+struct PlatformBlobSigner {
+    platform: Arc<dyn PlatformSigner>,
+    storage: KeyStorage,
+    public_key: russh::keys::PublicKey,
+}
+
+impl BlobSigner for PlatformBlobSigner {
+    fn sign(&self, data: &[u8]) -> Result<Vec<u8>, String> {
+        use russh::keys::ssh_key::Algorithm;
+        let raw = self.platform.sign(&self.storage, data)?;
+        match self.public_key.algorithm() {
+            Algorithm::Ecdsa { curve } => termiux_keys::ecdsa_der_to_ssh(&raw, curve).map_err(|e| e.to_string()),
+            Algorithm::Rsa { .. } => Ok(termiux_keys::rsa_sha512_to_ssh(&raw)),
+            other => Err(format!("{other} keys cannot be used with platform signing")),
+        }
+    }
+}
+
 pub struct Core {
     pub store: Arc<Store>,
     pub secrets: Arc<dyn SecretStore>,
+    /// Hardware-backed keys; `None` on platforms without them.
+    pub platform: Option<Arc<dyn PlatformSigner>>,
+    /// ssh-agent socket override; `None` uses `SSH_AUTH_SOCK`.
+    pub agent_socket: Option<std::path::PathBuf>,
 }
 
 fn secret_string(secrets: &dyn SecretStore, secret: &SecretRef) -> Result<String, SessionError> {
@@ -100,7 +134,7 @@ impl Core {
                 let key = self.store.key(*key_id)?.ok_or(SessionError::MissingKey(*key_id))?;
                 self.key_credential(&key, ui)
             }
-            AuthMethod::Agent => Err(SessionError::Unsupported("ssh-agent authentication")),
+            AuthMethod::Agent => Ok(Credential::Agent { socket: self.agent_socket.clone() }),
         }
     }
 
@@ -123,10 +157,22 @@ impl Core {
                 let sk =
                     termiux_fido::SkKey::from_openssh(&file).map_err(|e| SessionError::InvalidKey(e.to_string()))?;
                 ui.status("Touch your security key");
-                Ok(Credential::SecurityKey { key: sk, pin: None })
+                let prompt_ui = ui.clone();
+                let ask_pin: termiux_fido::PinPrompt =
+                    Arc::new(move |reason: &str| prompt_ui.ask_secret("Security key PIN", reason));
+                Ok(Credential::SecurityKey { key: sk, pin: None, ask_pin: Some(ask_pin) })
             }
-            KeyStorage::Piv { .. } => Err(SessionError::Unsupported("PIV keys")),
-            KeyStorage::SecureEnclave { .. } => Err(SessionError::Unsupported("Secure Enclave keys")),
+            storage @ (KeyStorage::Piv { .. } | KeyStorage::SecureEnclave { .. }) => {
+                let platform =
+                    self.platform.clone().ok_or(SessionError::Unsupported("hardware keys on this device"))?;
+                let public_key = russh::keys::PublicKey::from_openssh(&key.public_key)
+                    .map_err(|e| SessionError::InvalidKey(e.to_string()))?;
+                if matches!(storage, KeyStorage::Piv { .. }) {
+                    ui.status("Enter the smartcard PIN if asked");
+                }
+                let signer = PlatformBlobSigner { platform, storage: storage.clone(), public_key: public_key.clone() };
+                Ok(Credential::External { public_key, signer: Arc::new(signer) })
+            }
         }
     }
 
@@ -168,6 +214,77 @@ impl Core {
         Ok(key)
     }
 
+    /// Generates a software key; the private key goes to the secret store.
+    pub fn generate_key(
+        &self,
+        label: &str,
+        kind: termiux_keys::KeyType,
+        passphrase: Option<&str>,
+    ) -> Result<Key, SessionError> {
+        let key = termiux_keys::generate(kind, label)?;
+        let file = termiux_keys::to_openssh(&key, passphrase)?;
+        self.import_key(label, &file, passphrase)
+    }
+
+    /// Creates a FIDO2 key on the connected security key. Blocks until touched; fails
+    /// with `FidoError::PinRequired` when the key needs its PIN.
+    pub fn generate_security_key(&self, label: &str, pin: Option<&str>) -> Result<Key, SessionError> {
+        let sk = termiux_fido::generate_ed25519(termiux_fido::DEFAULT_APPLICATION, label, pin)?;
+        let file = sk.to_openssh().map_err(|e| SessionError::InvalidKey(e.to_string()))?;
+        self.import_key(label, &file, None)
+    }
+
+    /// Registers a key that lives in hardware (PIV slot, Secure Enclave) by its public key.
+    pub fn add_platform_key(&self, label: &str, public_key: &str, storage: KeyStorage) -> Result<Key, SessionError> {
+        let parsed =
+            russh::keys::PublicKey::from_openssh(public_key).map_err(|e| SessionError::InvalidKey(e.to_string()))?;
+        let mut line = parsed.clone();
+        line.set_comment(label);
+        let key = Key {
+            id: Uuid::new_v4(),
+            label: label.to_string(),
+            public_key: line.to_openssh().map_err(|e| SessionError::InvalidKey(e.to_string()))?,
+            storage,
+            updated_at: now(),
+        };
+        self.store.save_key(&key)?;
+        Ok(key)
+    }
+
+    /// The private key file for a software key, re-encrypted with `passphrase` if given.
+    pub fn export_private_key(&self, id: Uuid, passphrase: Option<&str>) -> Result<String, SessionError> {
+        let key = self.store.key(id)?.ok_or(SessionError::MissingKey(id))?;
+        match &key.storage {
+            KeyStorage::Software { secret, passphrase: stored } => {
+                let file = secret_string(self.secrets.as_ref(), secret)?;
+                let stored = stored.as_ref().map(|p| secret_string(self.secrets.as_ref(), p)).transpose()?;
+                Ok(termiux_keys::export(&file, stored.as_deref(), passphrase)?)
+            }
+            // The key handle file is all there is to export for FIDO2 keys.
+            KeyStorage::SecurityKey { key_handle } => secret_string(self.secrets.as_ref(), key_handle),
+            _ => Err(SessionError::Unsupported("exporting hardware-bound keys")),
+        }
+    }
+
+    /// Connects to `host` with its own credentials and appends `key_id`'s public key to
+    /// `~/.ssh/authorized_keys`, unless it is already there.
+    pub async fn install_public_key(
+        &self,
+        host: Host,
+        key_id: Uuid,
+        ui: Arc<dyn Interaction>,
+    ) -> Result<(), SessionError> {
+        let key = self.store.key(key_id)?.ok_or(SessionError::MissingKey(key_id))?;
+        let session = self.connect_session(&host, ui).await?;
+        let script = authorized_keys_script(&key.public_key)?;
+        let (status, output) = session.exec_with_input("sh -s", Some(script.as_bytes())).await?;
+        let _ = session.disconnect().await;
+        match status {
+            Some(0) => Ok(()),
+            _ => Err(SessionError::InstallFailed(String::from_utf8_lossy(&output).trim().to_string())),
+        }
+    }
+
     /// Deletes a key record and its secrets.
     pub fn delete_key(&self, id: Uuid) -> Result<(), SessionError> {
         if let Some(key) = self.store.key(id)? {
@@ -206,6 +323,29 @@ impl Core {
     }
 
     /// Connects to a saved host and opens an interactive shell.
+    async fn connect_session(&self, host: &Host, ui: Arc<dyn Interaction>) -> Result<SshSession, SessionError> {
+        let (store, secrets, platform, agent_socket) =
+            (self.store.clone(), self.secrets.clone(), self.platform.clone(), self.agent_socket.clone());
+        let (resolve_host, resolve_ui) = (host.clone(), ui.clone());
+        // Resolving may prompt the user; keep it off the async workers.
+        let credential = tokio::task::spawn_blocking(move || {
+            Core { store, secrets, platform, agent_socket }.resolve_credential(&resolve_host, &resolve_ui)
+        })
+        .await
+        .map_err(|_| SessionError::Cancelled)??;
+        self.connect_with(host, credential, ui).await
+    }
+
+    async fn connect_with(
+        &self,
+        host: &Host,
+        credential: Credential,
+        ui: Arc<dyn Interaction>,
+    ) -> Result<SshSession, SessionError> {
+        let verifier = Arc::new(KnownHostsVerifier { store: self.store.clone(), prompt: Arc::new(PromptAdapter(ui)) });
+        Ok(SshSession::connect(host, credential, verifier).await?)
+    }
+
     pub async fn connect(
         &self,
         host: Host,
@@ -214,18 +354,7 @@ impl Core {
         ui: Arc<dyn Interaction>,
         sink: Arc<dyn TerminalSink>,
     ) -> Result<TerminalSession, SessionError> {
-        let (core_store, secrets) = (self.store.clone(), self.secrets.clone());
-        let resolve_host = host.clone();
-        let resolve_ui = ui.clone();
-        // Resolving may prompt the user; keep it off the async workers.
-        let credential = tokio::task::spawn_blocking(move || {
-            Core { store: core_store, secrets }.resolve_credential(&resolve_host, &resolve_ui)
-        })
-        .await
-        .map_err(|_| SessionError::Cancelled)??;
-
-        let verifier = Arc::new(KnownHostsVerifier { store: self.store.clone(), prompt: Arc::new(PromptAdapter(ui)) });
-        let session = SshSession::connect(&host, credential, verifier).await?;
+        let session = self.connect_session(&host, ui).await?;
         let out = sink.clone();
         let shell =
             session.open_shell(&host.term, cols, rows, move |b| out.output(b), move |end| sink.ended(end)).await?;
@@ -296,5 +425,60 @@ impl TerminalSession {
                 let _ = shell.kill();
             }
         }
+    }
+}
+
+/// POSIX sh script that adds `public_key` to authorized_keys once, with safe permissions.
+fn authorized_keys_script(public_key: &str) -> Result<String, SessionError> {
+    let mut parts = public_key.split_whitespace();
+    let (Some(alg), Some(blob)) = (parts.next(), parts.next()) else {
+        return Err(SessionError::InvalidKey("malformed public key".into()));
+    };
+    let safe = |s: &str| s.chars().all(|c| c.is_ascii_alphanumeric() || "+/=@.-_".contains(c));
+    if !safe(alg) || !safe(blob) {
+        return Err(SessionError::InvalidKey("unexpected characters in public key".into()));
+    }
+    // The comment is dropped: it is free text and not needed for authentication.
+    Ok(format!(
+        "set -e\numask 077\nmkdir -p \"$HOME/.ssh\"\nf=\"$HOME/.ssh/authorized_keys\"\ntouch \"$f\"\n\
+         if ! grep -qF '{alg} {blob}' \"$f\"; then printf '%s\\n' '{alg} {blob} termiux' >> \"$f\"; fi\n\
+         chmod 600 \"$f\"\n"
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn run_script(home: &std::path::Path, script: &str) {
+        use std::io::Write;
+        let mut child = std::process::Command::new("sh")
+            .arg("-s")
+            .env("HOME", home)
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(script.as_bytes()).unwrap();
+        assert!(child.wait().unwrap().success());
+    }
+
+    #[test]
+    fn authorized_keys_script_is_idempotent_and_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        let script = authorized_keys_script("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBXM my laptop").unwrap();
+        run_script(home.path(), &script);
+        run_script(home.path(), &script);
+        let file = home.path().join(".ssh/authorized_keys");
+        let contents = std::fs::read_to_string(&file).unwrap();
+        assert_eq!(contents, "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBXM termiux\n");
+        assert_eq!(std::fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(std::fs::metadata(home.path().join(".ssh")).unwrap().permissions().mode() & 0o777, 0o700);
+    }
+
+    #[test]
+    fn authorized_keys_script_rejects_injection() {
+        assert!(authorized_keys_script("ssh-ed25519 AAAA';rm -rf ~;'").is_err());
+        assert!(authorized_keys_script("ssh-ed25519").is_err());
     }
 }

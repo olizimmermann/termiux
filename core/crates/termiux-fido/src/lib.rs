@@ -25,14 +25,35 @@ pub enum FidoError {
     NoDevice,
     #[error("security key: {0}")]
     Device(String),
+    #[error("the security key needs its PIN")]
+    PinRequired,
+    #[error("wrong security key PIN")]
+    PinInvalid,
+    #[error("the security key PIN is blocked; reset it with the vendor tool")]
+    PinBlocked,
+    #[error("timed out waiting for a touch on the security key")]
+    Timeout,
     #[error("unexpected response from security key: {0}")]
     Protocol(&'static str),
     #[error("key encoding: {0}")]
     Encoding(#[from] russh::keys::ssh_key::Error),
 }
 
+/// Maps CTAP2 status codes (only exposed in ctap-hid-fido2's error text) to typed errors.
 fn device_err(e: impl std::fmt::Display) -> FidoError {
-    FidoError::Device(e.to_string())
+    let message = e.to_string();
+    let has = |code: &str| message.contains(code);
+    if has("0x36") {
+        FidoError::PinRequired
+    } else if has("0x31") {
+        FidoError::PinInvalid
+    } else if has("0x32") || has("0x34") {
+        FidoError::PinBlocked
+    } else if has("0x3A") || has("0x2F") {
+        FidoError::Timeout
+    } else {
+        FidoError::Device(message)
+    }
 }
 
 /// A FIDO2-backed SSH key. Only the credential id (key handle) is stored on the host;
@@ -150,6 +171,33 @@ fn put_string(out: &mut Vec<u8>, bytes: &[u8]) {
 pub struct SkSigner {
     pub key: SkKey,
     pub pin: Option<String>,
+    /// Asked (blocking) when the key requires a PIN; the argument explains why.
+    pub ask_pin: Option<PinPrompt>,
+}
+
+pub type PinPrompt = std::sync::Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
+
+/// Signs, asking for the PIN when the key demands one (up to three attempts).
+pub fn sign_with_prompt(
+    key: &SkKey,
+    data: &[u8],
+    mut pin: Option<String>,
+    ask_pin: Option<&PinPrompt>,
+) -> Result<SkSignature, FidoError> {
+    for _ in 0..3 {
+        match sign(key, data, pin.as_deref()) {
+            Err(e @ (FidoError::PinRequired | FidoError::PinInvalid)) => {
+                let reason = if matches!(e, FidoError::PinInvalid) {
+                    "Wrong PIN, try again"
+                } else {
+                    "Enter the security key PIN"
+                };
+                pin = Some(ask_pin.and_then(|ask| ask(reason)).ok_or(e)?);
+            }
+            other => return other,
+        }
+    }
+    Err(FidoError::PinInvalid)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -169,10 +217,10 @@ impl russh::Signer for SkSigner {
         _hash_alg: Option<russh::keys::HashAlg>,
         mut to_sign: Vec<u8>,
     ) -> impl Future<Output = Result<Vec<u8>, SkAuthError>> + Send {
-        let (key, pin) = (self.key.clone(), self.pin.clone());
+        let (key, pin, ask_pin) = (self.key.clone(), self.pin.clone(), self.ask_pin.clone());
         async move {
             let data = to_sign.clone();
-            let sig = tokio::task::spawn_blocking(move || sign(&key, &data, pin.as_deref()))
+            let sig = tokio::task::spawn_blocking(move || sign_with_prompt(&key, &data, pin, ask_pin.as_ref()))
                 .await
                 .map_err(|e| FidoError::Device(e.to_string()))??;
             // russh expects the signed buffer with the signature blob appended as an SSH string.
