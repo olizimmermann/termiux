@@ -3,6 +3,7 @@ import TermiuxCore
 
 struct ContentView: View {
     @Environment(AppModel.self) private var app
+    @Environment(\.openWindow) private var openWindow
     @State private var editing: HostRecord?
     @State private var showingKeys = false
     @State private var search = ""
@@ -25,6 +26,7 @@ struct ContentView: View {
                             .onTapGesture(count: 2) { app.connect(host) }
                             .contextMenu {
                                 Button("Connect") { app.connect(host) }
+                                Button("Browse Files (SFTP)") { openWindow(id: "sftp", value: SFTPTarget(hostID: host.id)) }
                                 Button("Edit…") { editing = host }
                                 Button("Install Public Key…") { showingKeys = true }
                                 Divider()
@@ -45,6 +47,13 @@ struct ContentView: View {
                     }
                     .help("Quick Connect (⌘K)")
                     Button { editing = .new } label: { Label("New Host", systemImage: "plus") }
+                    Button {
+                        if let host = app.focusedHost { openWindow(id: "sftp", value: SFTPTarget(hostID: host.id)) }
+                    } label: {
+                        Label("Files", systemImage: "folder")
+                    }
+                    .help("Browse files of the focused SSH session (SFTP)")
+                    .disabled(app.focusedHost == nil)
                     Button { showingKeys = true } label: { Label("Keys", systemImage: "key") }
                     if BuildFlavor.hasLocalShell {
                         Button { app.openLocalShell() } label: { Label("Local Shell", systemImage: "terminal") }

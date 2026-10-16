@@ -123,3 +123,34 @@ async fn local_forward_through_openssh() {
     tokio::time::timeout(Duration::from_secs(5), stream.read_exact(&mut banner)).await.unwrap().unwrap();
     assert_eq!(&banner, b"SSH-2.0");
 }
+
+#[tokio::test]
+#[ignore = "needs docker sshd"]
+async fn sftp_over_openssh() {
+    let session = SshSession::connect(
+        &test_host(),
+        Credential::Password { password: "termiux".into(), fallback: None },
+        Arc::new(AcceptAll),
+    )
+    .await
+    .unwrap();
+    let sftp = termiux_sftp::Sftp::new(session.open_sftp_stream().await.unwrap()).await.unwrap();
+    let home = sftp.home().await.unwrap();
+    let dir = termiux_sftp::join(&home, "termiux-sftp-test");
+    let _ = sftp.remove(&dir).await;
+    sftp.mkdir(&dir).await.unwrap();
+
+    let local = tempfile::tempdir().unwrap();
+    let source = local.path().join("hello.txt");
+    std::fs::write(&source, "over real sshd").unwrap();
+    let (report, cancel) = (|_, _| {}, std::sync::atomic::AtomicBool::new(false));
+    let progress = termiux_sftp::Progress { report: &report, cancel: &cancel };
+    let remote = termiux_sftp::join(&dir, "hello.txt");
+    sftp.upload(&source, &remote, &progress).await.unwrap();
+    assert_eq!(sftp.list(&dir).await.unwrap()[0].name, "hello.txt");
+
+    let back = local.path().join("back.txt");
+    sftp.download(&remote, &back, &progress).await.unwrap();
+    assert_eq!(std::fs::read_to_string(back).unwrap(), "over real sshd");
+    sftp.remove(&dir).await.unwrap();
+}

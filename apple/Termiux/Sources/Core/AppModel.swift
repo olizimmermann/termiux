@@ -176,6 +176,12 @@ final class AppModel {
     var selectedTab: WorkspaceTab? { tabs.first { $0.id == selectedTabID } }
     var focusedSession: TerminalSessionModel? { selectedTab?.focused }
 
+    /// The saved host behind the focused pane, if it is an SSH session.
+    var focusedHost: HostRecord? {
+        guard case .ssh(let host)? = focusedSession?.kind else { return nil }
+        return host
+    }
+
     private func makeSession(_ kind: TerminalSessionModel.Kind) -> TerminalSessionModel? {
         guard let core else { return nil }
         if case .local = kind, !BuildFlavor.hasLocalShell { return nil }

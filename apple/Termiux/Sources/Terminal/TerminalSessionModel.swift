@@ -108,6 +108,12 @@ final class TerminalSessionModel: Identifiable {
         }
     }
 
+    /// SFTP over this session's connection, if it is a running SSH session.
+    func openSftp() async throws -> FileBrowser? {
+        guard let session else { return nil }
+        return try await session.openSftp()
+    }
+
     func refreshForwards() async {
         guard let session else {
             forwards = []

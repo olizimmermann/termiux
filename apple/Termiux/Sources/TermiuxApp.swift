@@ -55,6 +55,12 @@ struct TermiuxApp: App {
             }
         }
 
+        WindowGroup("Files", id: "sftp", for: SFTPTarget.self) { $target in
+            if let target {
+                SFTPWindow(target: target).environment(app)
+            }
+        }
+
         Settings {
             SettingsView().environment(app)
         }

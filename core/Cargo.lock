@@ -2649,6 +2649,7 @@ dependencies = [
  "termiux-fido",
  "termiux-keys",
  "termiux-model",
+ "termiux-sftp",
  "termiux-store",
  "thiserror 2.0.21",
  "tokio",

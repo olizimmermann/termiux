@@ -18,3 +18,4 @@ rpassword = "7.5.4"
 uuid.workspace = true
 termiux-keys.workspace = true
 tempfile = "3.27"
+termiux-sftp.workspace = true
