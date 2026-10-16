@@ -1,0 +1,5 @@
+// Signing for running on your own devices. Put your team in Local.xcconfig (not committed):
+//   DEVELOPMENT_TEAM = ABCDE12345
+// Find the ID in Xcode › Settings › Accounts, or developer.apple.com › Membership.
+CODE_SIGN_STYLE = Automatic
+#include? "Local.xcconfig"

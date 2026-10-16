@@ -50,6 +50,9 @@ targets:
   TermiuxMobile:
     type: application
     platform: iOS
+    configFiles:
+      Debug: Signing.xcconfig
+      Release: Signing.xcconfig
     sources: [Termiux/Sources/Shared, Termiux/Sources/iOS]
     dependencies:
       - package: TermiuxCore
