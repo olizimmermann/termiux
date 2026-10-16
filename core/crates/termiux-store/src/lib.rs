@@ -45,7 +45,12 @@ const MIGRATIONS: &[&str] = &[
      );",
     // 2: user themes
     "CREATE TABLE themes (id TEXT PRIMARY KEY, label TEXT NOT NULL, data TEXT NOT NULL, updated_at INTEGER NOT NULL);",
+    // 3: small settings/state values (sync state, device id)
+    "CREATE TABLE kv (key TEXT PRIMARY KEY, value BLOB NOT NULL);",
 ];
+
+/// Record tables that sync. Order matters on apply: groups and keys before hosts.
+pub const SYNCED_TABLES: &[&str] = &["groups", "keys", "themes", "hosts"];
 
 /// A record kind stored in its own table as JSON.
 trait Record: Serialize + DeserializeOwned {
@@ -196,6 +201,74 @@ impl Store {
     }
     pub fn delete_theme(&self, id: Uuid) -> Result<bool> {
         self.delete::<Theme>(id)
+    }
+
+    // MARK: raw access for sync
+
+    /// All records of a synced table as JSON, by id.
+    pub fn raw_records(&self, table: &str) -> Result<Vec<(String, serde_json::Value)>> {
+        assert!(SYNCED_TABLES.contains(&table), "not a synced table: {table}");
+        let conn = self.conn();
+        let mut stmt = conn.prepare(&format!("SELECT id, data FROM {table}"))?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        rows.map(|row| {
+            let (id, data) = row?;
+            Ok((id, serde_json::from_str(&data)?))
+        })
+        .collect()
+    }
+
+    /// Writes a record received from sync. The JSON must deserialize as the table's type.
+    pub fn put_raw_record(&self, table: &str, value: &serde_json::Value) -> Result<()> {
+        match table {
+            "hosts" => self.put(&serde_json::from_value::<Host>(value.clone())?),
+            "groups" => self.put(&serde_json::from_value::<Group>(value.clone())?),
+            "keys" => self.put(&serde_json::from_value::<Key>(value.clone())?),
+            "themes" => self.put(&serde_json::from_value::<Theme>(value.clone())?),
+            _ => panic!("not a synced table: {table}"),
+        }
+    }
+
+    pub fn delete_raw_record(&self, table: &str, id: &str) -> Result<()> {
+        assert!(SYNCED_TABLES.contains(&table), "not a synced table: {table}");
+        self.conn().execute(&format!("DELETE FROM {table} WHERE id = ?1"), [id])?;
+        Ok(())
+    }
+
+    /// Every known host key as (host, port, key).
+    pub fn all_known_host_keys(&self) -> Result<Vec<(String, u16, KnownHostKey)>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare("SELECT host, port, algorithm, public_key, fingerprint FROM known_hosts")?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                KnownHostKey { algorithm: r.get(2)?, public_key: r.get(3)?, fingerprint: r.get(4)? },
+            ))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn forget_host_key(&self, host: &str, port: u16, algorithm: &str) -> Result<()> {
+        self.conn().execute(
+            "DELETE FROM known_hosts WHERE host = ?1 AND port = ?2 AND algorithm = ?3",
+            params![host, port, algorithm],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_value(&self, key: &str) -> Result<Option<Vec<u8>>> {
+        Ok(self.conn().query_row("SELECT value FROM kv WHERE key = ?1", [key], |r| r.get(0)).optional()?)
+    }
+
+    pub fn set_value(&self, key: &str, value: &[u8]) -> Result<()> {
+        self.conn().execute("INSERT OR REPLACE INTO kv (key, value) VALUES (?1, ?2)", params![key, value])?;
+        Ok(())
+    }
+
+    pub fn delete_value(&self, key: &str) -> Result<()> {
+        self.conn().execute("DELETE FROM kv WHERE key = ?1", [key])?;
+        Ok(())
     }
 
     /// Checks a presented server key against known_hosts. Any recorded key for the same

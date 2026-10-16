@@ -197,6 +197,12 @@ checksum = "fd307490d624467aa6f74b0eabb77633d1f758a7b25f12bceb0b22e08d9726f6"
 
 [[package]]
 name = "base64"
+version = "0.22.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
+
+[[package]]
+name = "base64"
 version = "0.23.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
@@ -379,6 +385,18 @@ dependencies = [
  "cpufeatures",
  "rand_core",
  "zeroize",
+]
+
+[[package]]
+name = "chacha20poly1305"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9b89e1c441e926b9c82a8d023f6e1b7ae0adcfaa7d621814e4d60789bac751cb"
+dependencies = [
+ "aead",
+ "chacha20",
+ "cipher",
+ "poly1305",
 ]
 
 [[package]]
@@ -572,7 +590,7 @@ checksum = "73e2cee48715b2a8fae3739aeb8433817051a6772562ba67f9b631fc833eb793"
 dependencies = [
  "aes",
  "anyhow",
- "base64",
+ "base64 0.23.1",
  "byteorder",
  "cbc",
  "ciborium",
@@ -1710,7 +1728,7 @@ version = "1.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2896bade328c13f7042a297ea5ac5b0951f6cf989dea5f32c2fd98da398195cb"
 dependencies = [
- "base64",
+ "base64 0.23.1",
  "indexmap",
  "quick-xml",
  "serde",
@@ -2568,6 +2586,7 @@ dependencies = [
  "termiux-sftp",
  "termiux-ssh",
  "termiux-store",
+ "termiux-sync",
  "termiux-theme",
  "thiserror 2.0.21",
  "tokio",
@@ -2665,6 +2684,23 @@ dependencies = [
  "serde_json",
  "tempfile",
  "termiux-model",
+ "thiserror 2.0.21",
+ "uuid",
+]
+
+[[package]]
+name = "termiux-sync"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "chacha20poly1305",
+ "getrandom 0.4.3",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "termiux-model",
+ "termiux-store",
  "thiserror 2.0.21",
  "uuid",
 ]

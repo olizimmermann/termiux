@@ -1039,3 +1039,104 @@ impl FileBrowser {
         self.inner.close().await;
     }
 }
+
+// MARK: sync
+
+const VAULT_KEY_SECRET: &str = "sync.vault-key";
+const INCLUDE_SECRETS_KEY: &str = "sync.include-secrets";
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct SyncSettings {
+    /// This device belongs to a vault (has its key).
+    pub enabled: bool,
+    pub include_secrets: bool,
+    pub device_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct SyncReport {
+    pub received: u32,
+    pub sent: u32,
+    pub devices: u32,
+}
+
+fn sync_err(e: termiux_sync::SyncError) -> CoreError {
+    match e {
+        termiux_sync::SyncError::InvalidCode => CoreError::Failed { message: e.to_string() },
+        other => failed(other),
+    }
+}
+
+impl TermiuxCore {
+    fn vault_key(&self) -> Result<Option<termiux_sync::VaultKey>, CoreError> {
+        let secret = model::SecretRef(VAULT_KEY_SECRET.into());
+        match self.core.secrets.get(&secret).map_err(failed)? {
+            Some(bytes) => Ok(Some(termiux_sync::VaultKey::from_bytes(&bytes).map_err(sync_err)?)),
+            None => Ok(None),
+        }
+    }
+
+    fn store_vault_key(&self, key: &termiux_sync::VaultKey) -> Result<(), CoreError> {
+        termiux_sync::reset(&self.core.store).map_err(sync_err)?;
+        self.core.secrets.set(&model::SecretRef(VAULT_KEY_SECRET.into()), key.as_bytes()).map_err(failed)
+    }
+}
+
+#[uniffi::export(async_runtime = "tokio")]
+impl TermiuxCore {
+    pub fn sync_settings(&self) -> Result<SyncSettings, CoreError> {
+        Ok(SyncSettings {
+            enabled: self.vault_key()?.is_some(),
+            include_secrets: self.core.store.get_value(INCLUDE_SECRETS_KEY)?.is_some_and(|v| v == b"1"),
+            device_id: termiux_sync::device_id(&self.core.store).map_err(sync_err)?,
+        })
+    }
+
+    /// Starts a new vault on this device and returns its sync code for other devices.
+    pub fn create_vault(&self) -> Result<String, CoreError> {
+        let key = termiux_sync::VaultKey::generate().map_err(sync_err)?;
+        self.store_vault_key(&key)?;
+        Ok(key.to_code())
+    }
+
+    /// Joins an existing vault with a sync code from another device.
+    pub fn join_vault(&self, code: String) -> Result<(), CoreError> {
+        let key = termiux_sync::VaultKey::from_code(&code).map_err(sync_err)?;
+        self.store_vault_key(&key)
+    }
+
+    /// The sync code, to set up another device.
+    pub fn vault_code(&self) -> Result<Option<String>, CoreError> {
+        Ok(self.vault_key()?.map(|k| k.to_code()))
+    }
+
+    /// Stops syncing on this device. Local data stays.
+    pub fn leave_vault(&self) -> Result<(), CoreError> {
+        self.core.secrets.delete(&model::SecretRef(VAULT_KEY_SECRET.into())).map_err(failed)?;
+        termiux_sync::reset(&self.core.store).map_err(sync_err)
+    }
+
+    pub fn set_sync_include_secrets(&self, include: bool) -> Result<(), CoreError> {
+        Ok(self.core.store.set_value(INCLUDE_SECRETS_KEY, if include { b"1" } else { b"0" })?)
+    }
+
+    /// Runs one sync round through a shared folder.
+    pub async fn sync_folder(&self, folder: String) -> Result<SyncReport, CoreError> {
+        let key = self.vault_key()?.ok_or_else(|| failed("sync is not set up"))?;
+        let include_secrets = self.sync_settings()?.include_secrets;
+        let core = self.core.clone();
+        runtime()
+            .spawn_blocking(move || {
+                let engine = termiux_sync::SyncEngine {
+                    store: &core.store,
+                    secrets: core.secrets.as_ref(),
+                    key: &key,
+                    include_secrets,
+                };
+                engine.sync(&termiux_sync::FolderTransport { dir: folder.into() }).map_err(sync_err)
+            })
+            .await
+            .map_err(failed)?
+            .map(|r| SyncReport { received: r.received as u32, sent: r.sent as u32, devices: r.devices as u32 })
+    }
+}
