@@ -59,6 +59,15 @@ final class Prompts: Interaction, @unchecked Sendable {
         onStatus(message)
     }
 
+    /// Asks from app code on the main thread (not the core); nil when cancelled.
+    @MainActor
+    static func ask(_ request: PromptRequest) async -> [String]? {
+        guard let presenter else { return nil }
+        return await withCheckedContinuation { continuation in
+            presenter.present(request) { continuation.resume(returning: $0) }
+        }
+    }
+
     private func ask(_ request: PromptRequest) -> [String]? {
         // Blocking the main thread for its own reply would hang the app.
         guard !Thread.isMainThread else { return nil }

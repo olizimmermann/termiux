@@ -128,11 +128,8 @@ struct MobileKeysView: View {
     }
 
     private func importFile(_ url: URL) async {
-        let scoped = url.startAccessingSecurityScopedResource()
-        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
         do {
-            let contents = try String(contentsOf: url, encoding: .utf8)
-            await importKey(label: url.lastPathComponent, contents: contents)
+            _ = try await app.importKeyFile(url)
         } catch {
             message = ("Import failed", error.localizedDescription)
         }
@@ -140,22 +137,14 @@ struct MobileKeysView: View {
 
     private func importKey(label: String, contents: String) async {
         do {
-            do {
-                _ = try app.importKey(label: label, contents: contents, passphrase: nil)
-            } catch CoreError.InvalidKey(let text) where text == "key is encrypted" {
-                guard let passphrase = await AlertPrompts.ask(.form(
-                    title: "Key passphrase", message: "“\(label)” is protected by a passphrase.",
-                    fields: [PromptField(label: "Passphrase", secure: true)]))?.first
-                else { return }
-                _ = try app.importKey(label: label, contents: contents, passphrase: passphrase)
-            }
+            _ = try await app.importKeyAskingPassphrase(label: label, contents: contents)
         } catch {
             message = ("Import failed", error.localizedDescription)
         }
     }
 
     private func createSecureEnclaveKey() async {
-        guard let name = await AlertPrompts.ask(.form(
+        guard let name = await Prompts.ask(.form(
             title: "New Face ID / Touch ID Key",
             message: "The key is created in the Secure Enclave of \(Device.thisDevice) and can never be exported. "
                 + "Each login asks for Face ID or Touch ID.",
@@ -173,7 +162,7 @@ struct MobileKeysView: View {
     private func export(_ key: KeyRecord) async {
         var passphrase: String?
         if key.kind == .software {
-            guard let fields = await AlertPrompts.ask(.form(
+            guard let fields = await Prompts.ask(.form(
                 title: "Export “\(key.label)”",
                 message: "Anyone with this file can log in as you. Protect it with a passphrase unless you know "
                     + "you don't need one.",

@@ -23,6 +23,9 @@ struct HostEditor: View {
     @State private var jumpHostIDs: [String]
     @State private var forwards: [PortForwardRecord]
     @State private var editingForward: PortForwardRecord?
+    @State private var creatingKey = false
+    @State private var importingKey = false
+    @State private var keyError: String?
 
     init(host: HostRecord) {
         original = host
@@ -95,8 +98,13 @@ struct HostEditor: View {
                                 Text(key.label).tag(key.id)
                             }
                         }
-                        if app.keys.isEmpty {
-                            Text("Add a key under Keys first.").font(.caption).foregroundStyle(.secondary)
+                        HStack {
+                            Button("New Key…", systemImage: "plus") { creatingKey = true }
+                            Button("Import…", systemImage: "square.and.arrow.down") { importingKey = true }
+                        }
+                        .buttonStyle(.borderless)
+                        if let keyError {
+                            Text(keyError).font(.caption).foregroundStyle(.red)
                         }
                     case .keyboardInteractive:
                         Text("The server's prompts (password, one-time codes) are shown when connecting.")
@@ -159,6 +167,20 @@ struct HostEditor: View {
                     TextField("Terminal type", text: $term).technicalInput()
                     TextField("Startup command", text: $startupCommand, prompt: Text("Optional, e.g. tmux attach"))
                         .technicalInput()
+                }
+            }
+        }
+        .sheet(isPresented: $creatingKey) {
+            GenerateKeySheet { key in keyId = key.id }
+        }
+        .fileImporter(isPresented: $importingKey, allowedContentTypes: [.item]) { result in
+            guard case .success(let url) = result else { return }
+            Task {
+                do {
+                    if let key = try await app.importKeyFile(url) { keyId = key.id }
+                    keyError = nil
+                } catch {
+                    keyError = "Import failed: \(error.localizedDescription)"
                 }
             }
         }

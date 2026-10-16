@@ -45,6 +45,8 @@ struct KeyRow: View {
 struct GenerateKeySheet: View {
     @Environment(AppModel.self) private var app
     @Environment(\.dismiss) private var dismiss
+    /// Called with the new key, e.g. to select it in the host editor.
+    var onCreated: ((KeyRecord) -> Void)?
     @State private var name = ""
     @State private var algorithm = KeyAlgorithm.ed25519
     @State private var passphrase = ""
@@ -84,9 +86,11 @@ struct GenerateKeySheet: View {
         // RSA generation takes a moment; keep the UI responsive.
         Task.detached {
             do {
-                _ = try core.generateKey(label: name, algorithm: algorithm, passphrase: passphrase.isEmpty ? nil : passphrase)
+                let key = try core.generateKey(
+                    label: name, algorithm: algorithm, passphrase: passphrase.isEmpty ? nil : passphrase)
                 await MainActor.run {
                     app.reload()
+                    onCreated?(key)
                     dismiss()
                 }
             } catch {
@@ -276,5 +280,29 @@ struct InstallKeySheet: View {
                 state = (false, error.localizedDescription, true)
             }
         }
+    }
+}
+
+extension AppModel {
+    /// Imports an OpenSSH private key file, asking for its passphrase when it has one.
+    /// Returns nil when the user cancels the passphrase prompt.
+    func importKeyAskingPassphrase(label: String, contents: String) async throws -> KeyRecord? {
+        do {
+            return try importKey(label: label, contents: contents, passphrase: nil)
+        } catch CoreError.InvalidKey(let text) where text == "key is encrypted" {
+            guard let passphrase = await Prompts.ask(.form(
+                title: "Key passphrase", message: "“\(label)” is protected by a passphrase.",
+                fields: [PromptField(label: "Passphrase", secure: true)]))?.first
+            else { return nil }
+            return try importKey(label: label, contents: contents, passphrase: passphrase)
+        }
+    }
+
+    /// Imports a key file picked with `fileImporter` (security-scoped on iOS and in the sandbox).
+    func importKeyFile(_ url: URL) async throws -> KeyRecord? {
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        let contents = try String(contentsOf: url, encoding: .utf8)
+        return try await importKeyAskingPassphrase(label: url.lastPathComponent, contents: contents)
     }
 }

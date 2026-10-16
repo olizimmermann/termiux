@@ -32,14 +32,6 @@ final class AlertPrompts: PromptPresenter {
         top.present(alert, animated: true)
     }
 
-    /// Asks from app code (not the core); nil when cancelled.
-    static func ask(_ request: PromptRequest) async -> [String]? {
-        guard let presenter = Prompts.presenter else { return nil }
-        return await withCheckedContinuation { continuation in
-            presenter.present(request) { continuation.resume(returning: $0) }
-        }
-    }
-
     private static func topViewController() -> UIViewController? {
         let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
         let scene = scenes.first { $0.activationState == .foregroundActive } ?? scenes.first
