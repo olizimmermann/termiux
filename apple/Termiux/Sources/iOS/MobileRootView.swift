@@ -9,6 +9,8 @@ struct MobileRootView: View {
     @State private var screen: Screen?
     @State private var search = ""
     @State private var deleting: HostRecord?
+    @State private var columns = NavigationSplitViewVisibility.automatic
+    @Environment(\.horizontalSizeClass) private var sizeClass
 
     enum Screen: String, Identifiable {
         case keys, settings
@@ -17,7 +19,7 @@ struct MobileRootView: View {
 
     var body: some View {
         @Bindable var app = app
-        NavigationSplitView {
+        NavigationSplitView(columnVisibility: $columns) {
             List(selection: $app.selectedTabID) {
                 if !app.tabs.isEmpty {
                     Section("Sessions") {
@@ -62,6 +64,9 @@ struct MobileRootView: View {
                 ToolbarItem(placement: .primaryAction) {
                     Button("New Host", systemImage: "plus") { editing = .new }
                 }
+                ToolbarItem(placement: .primaryAction) {
+                    Button("Quick Connect", systemImage: "bolt") { app.showingQuickConnect = true }
+                }
                 ToolbarItem(placement: .topBarLeading) {
                     Menu("More", systemImage: "ellipsis.circle") {
                         Button("Keys", systemImage: "key") { screen = .keys }
@@ -70,13 +75,18 @@ struct MobileRootView: View {
                 }
             }
         } detail: {
-            if let tab = app.selectedTab, let session = tab.focused {
-                TerminalScreen(session: session, tab: tab).id(session.id)
+            if let tab = app.selectedTab {
+                TerminalScreen(tab: tab).id(tab.id)
             } else {
                 ContentUnavailableView("No Session", systemImage: "terminal", description: Text("Tap a host to connect."))
             }
         }
+        // On iPad, give a newly opened session the whole screen; the sidebar button brings the list back.
+        .onChange(of: app.selectedTabID) { _, id in
+            if id != nil && sizeClass == .regular { columns = .detailOnly }
+        }
         .sheet(item: $editing) { host in HostEditor(host: host) }
+        .sheet(isPresented: $app.showingQuickConnect) { QuickConnect().presentationDetents([.medium, .large]) }
         .sheet(item: $screen) { screen in
             switch screen {
             case .keys: MobileKeysView()

@@ -3,7 +3,7 @@ import Observation
 import TermiuxCore
 
 enum BuildFlavor {
-    #if SANDBOXED
+    #if SANDBOXED || os(iOS)
     static let sandboxed = true
     #else
     static let sandboxed = false

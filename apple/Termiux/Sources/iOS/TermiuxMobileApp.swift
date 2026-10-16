@@ -29,6 +29,7 @@ struct TermiuxMobileApp: App {
                     }
                 }
         }
+        .commands { TermiuxCommands(app: app) }
     }
 }
 
@@ -66,7 +67,8 @@ extension AppModel {
 #if DEBUG
 extension AppModel {
     /// Simulator smoke test: `simctl launch <device> com.ozimmermann.termiux -debugConnect user:password@host:port`
-    /// saves that host (once) and connects. `-debugAutoConfirm YES` accepts confirmation prompts.
+    /// saves that host (once) and connects. `-debugAutoConfirm YES` accepts confirmation prompts,
+    /// `-debugSplit YES` splits the pane.
     func debugConnectIfRequested() {
         guard let spec = UserDefaults.standard.string(forKey: "debugConnect"),
             let at = spec.lastIndex(of: "@"), let colon = spec[..<at].firstIndex(of: ":"),
@@ -85,6 +87,7 @@ extension AppModel {
             host = saved
         }
         connect(host)
+        if UserDefaults.standard.bool(forKey: "debugSplit") { splitFocused(.horizontal) }
     }
 }
 #endif

@@ -39,6 +39,7 @@ struct QuickConnect: View {
                 .font(.title3)
                 .padding(14)
                 .focused($fieldFocused)
+                .technicalInput()
                 .onSubmit(open)
                 .onChange(of: query) { selection = 0 }
             Divider()
@@ -60,7 +61,10 @@ struct QuickConnect: View {
                 .onChange(of: selection) { proxy.scrollTo(selection) }
             }
         }
+        #if os(macOS)
         .frame(width: 480, height: 340)
+        .onExitCommand { dismiss() }
+        #endif
         .onAppear { fieldFocused = true }
         .onKeyPress(.downArrow) {
             selection = min(selection + 1, max(items.count - 1, 0))
@@ -70,7 +74,6 @@ struct QuickConnect: View {
             selection = max(selection - 1, 0)
             return .handled
         }
-        .onExitCommand { dismiss() }
     }
 
     @ViewBuilder private func row(_ item: Item) -> some View {

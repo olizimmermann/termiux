@@ -66,7 +66,7 @@ struct ContentView: View {
                     TabBar()
                 }
                 if let tab = app.selectedTab {
-                    PaneTreeView(node: tab.root, tab: tab)
+                    PaneTreeView(node: tab.root, tab: tab) { session in TerminalPane(session: session, tab: tab) }
                         .id(tab.id)
                         .navigationTitle(tab.focused?.terminalTitle ?? tab.title)
                 } else {
