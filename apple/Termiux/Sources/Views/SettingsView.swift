@@ -11,6 +11,7 @@ struct SettingsView: View {
             if BuildFlavor.hasAgent {
                 SSHSettings().tabItem { Label("SSH", systemImage: "network") }
             }
+            SyncSettingsView().tabItem { Label("Sync", systemImage: "arrow.triangle.2.circlepath") }
         }
         .frame(width: 560, height: 440)
     }

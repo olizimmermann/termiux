@@ -31,6 +31,8 @@ final class AppModel {
     var errorMessage: String?
 
     @ObservationIgnored private var defaultsObserver: NSObjectProtocol?
+    /// Set once after init (it needs a reference back to the model).
+    @ObservationIgnored private(set) var sync: SyncController!
 
     init() {
         let secrets = KeychainSecretStore()
@@ -49,6 +51,7 @@ final class AppModel {
             startupError = "Could not open the Termiux database: \(error.localizedDescription)"
         }
         reload()
+        sync = SyncController(app: self)
         // Settings window edits UserDefaults; restyle open terminals when they change.
         defaultsObserver = NotificationCenter.default.addObserver(
             forName: UserDefaults.didChangeNotification, object: nil, queue: .main
@@ -84,6 +87,7 @@ final class AppModel {
         do {
             let saved = try core.saveHost(record: host, password: password)
             reload()
+            sync?.syncSoon()
             return saved
         } catch {
             errorMessage = error.localizedDescription
@@ -95,6 +99,7 @@ final class AppModel {
         do {
             try core?.deleteHost(id: host.id)
             reload()
+            sync?.syncSoon()
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -103,12 +108,14 @@ final class AppModel {
     func importKey(label: String, contents: String, passphrase: String?) throws -> KeyRecord? {
         let key = try core?.importKey(label: label, contents: contents, passphrase: passphrase)
         reload()
+        sync?.syncSoon()
         return key
     }
 
     func delete(key: KeyRecord) {
         do {
             try core?.deleteKey(id: key.id)
+            sync?.syncSoon()
             if case .secureEnclave(let tag) = key.platform {
                 hardwareKeys.deleteSecureEnclaveKey(tag: tag)
             }
@@ -131,11 +138,13 @@ final class AppModel {
     func importTheme(name: String, contents: Data) throws {
         _ = try core?.importTheme(name: name, contents: contents)
         reload()
+        sync?.syncSoon()
     }
 
     func delete(theme: ThemeRecord) {
         do {
             try core?.deleteTheme(id: theme.id)
+            sync?.syncSoon()
             if appearance.defaultThemeID == theme.id {
                 UserDefaults.standard.removeObject(forKey: Appearance.Key.defaultThemeID)
             }
