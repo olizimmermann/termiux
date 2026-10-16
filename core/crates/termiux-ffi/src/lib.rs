@@ -28,6 +28,14 @@ pub enum CoreError {
     InvalidKey { message: String },
     #[error("{message}")]
     InvalidTheme { message: String },
+    #[error("No security key found. Plug in your YubiKey and try again.")]
+    NoSecurityKey,
+    #[error("The security key needs its PIN")]
+    PinRequired,
+    #[error("Wrong PIN")]
+    PinInvalid,
+    #[error("{message}")]
+    SecurityKey { message: String },
     #[error("{message}")]
     Unsupported { message: String },
     #[error("{message}")]
@@ -49,6 +57,11 @@ impl CoreError {
                 CoreError::HostKeyNotTrusted { host }
             }
             SessionError::Cancelled => CoreError::Cancelled,
+            SessionError::Fido(termiux_fido::FidoError::NoDevice) => CoreError::NoSecurityKey,
+            SessionError::Fido(termiux_fido::FidoError::PinRequired) => CoreError::PinRequired,
+            SessionError::Fido(termiux_fido::FidoError::PinInvalid) => CoreError::PinInvalid,
+            SessionError::Fido(other) => CoreError::SecurityKey { message: other.to_string() },
+            SessionError::Ssh(SshError::SecurityKey(e)) => CoreError::SecurityKey { message: e.to_string() },
             SessionError::InvalidKey(message) => CoreError::InvalidKey { message },
             SessionError::Unsupported(what) => {
                 CoreError::Unsupported { message: format!("{what} are not supported yet") }
@@ -199,6 +212,56 @@ impl termiux_session::TerminalSink for SinkAdapter {
     }
 }
 
+/// Where a hardware-bound key lives.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
+pub enum PlatformKeyRef {
+    Piv { token_id: String, slot: String },
+    SecureEnclave { tag: String },
+}
+
+#[derive(Debug, thiserror::Error, uniffi::Error)]
+pub enum PlatformSignError {
+    #[error("{message}")]
+    Failed { message: String },
+}
+
+impl From<uniffi::UnexpectedUniFFICallbackError> for PlatformSignError {
+    fn from(e: uniffi::UnexpectedUniFFICallbackError) -> Self {
+        PlatformSignError::Failed { message: e.reason }
+    }
+}
+
+/// Signs with hardware keys (PIV via CryptoTokenKit, Secure Enclave). Returns X9.62 DER
+/// for ECDSA and PKCS#1 v1.5 SHA-512 for RSA. Called on core threads; may block.
+#[uniffi::export(with_foreign)]
+pub trait PlatformKeys: Send + Sync {
+    fn sign(&self, key: PlatformKeyRef, data: Vec<u8>) -> Result<Vec<u8>, PlatformSignError>;
+}
+
+struct PlatformAdapter(Arc<dyn PlatformKeys>);
+
+impl termiux_session::PlatformSigner for PlatformAdapter {
+    fn sign(&self, storage: &model::KeyStorage, data: &[u8]) -> Result<Vec<u8>, String> {
+        let key = match storage {
+            model::KeyStorage::Piv { token_id, slot } => {
+                PlatformKeyRef::Piv { token_id: token_id.clone(), slot: slot.clone() }
+            }
+            model::KeyStorage::SecureEnclave { tag } => PlatformKeyRef::SecureEnclave { tag: tag.clone() },
+            _ => return Err("not a platform key".into()),
+        };
+        self.0.sign(key, data.to_vec()).map_err(|e| e.to_string())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum KeyAlgorithm {
+    Ed25519,
+    EcdsaP256,
+    EcdsaP384,
+    Rsa3072,
+    Rsa4096,
+}
+
 // MARK: records
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
@@ -211,6 +274,8 @@ pub enum HostAuth {
         key_id: String,
     },
     KeyboardInteractive,
+    /// Keys from the running ssh-agent (direct build only).
+    Agent,
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
@@ -235,7 +300,8 @@ impl From<&model::Host> for HostRecord {
         let auth = match &h.auth {
             model::AuthMethod::Password { secret } => HostAuth::Password { saved: secret.is_some() },
             model::AuthMethod::Key { key_id } => HostAuth::Key { key_id: key_id.to_string() },
-            model::AuthMethod::KeyboardInteractive | model::AuthMethod::Agent => HostAuth::KeyboardInteractive,
+            model::AuthMethod::KeyboardInteractive => HostAuth::KeyboardInteractive,
+            model::AuthMethod::Agent => HostAuth::Agent,
         };
         Self {
             id: h.id.to_string(),
@@ -283,6 +349,18 @@ impl From<&model::Theme> for ThemeRecord {
             builtin: t.builtin,
         }
     }
+}
+
+/// OpenSSH public key line from a platform public key: an uncompressed EC point
+/// (`SecKeyCopyExternalRepresentation`, CryptoKit `x963Representation`) or PKCS#1 RSA DER.
+#[uniffi::export]
+pub fn openssh_public_key(raw: Vec<u8>, comment: String) -> Result<String, CoreError> {
+    let result = if raw.first() == Some(&0x04) {
+        termiux_keys::public_key_from_sec1(&raw, &comment)
+    } else {
+        termiux_keys::public_key_from_pkcs1(&raw, &comment)
+    };
+    result.map_err(|e| CoreError::InvalidKey { message: e.to_string() })
 }
 
 /// Id of the theme used when neither the host nor the user picked one.
@@ -350,7 +428,12 @@ pub struct TermiuxCore {
 impl TermiuxCore {
     /// Opens (or creates) the database in `data_dir`.
     #[uniffi::constructor]
-    pub fn open(data_dir: String, secrets: Arc<dyn SecretStore>) -> Result<Arc<Self>, CoreError> {
+    pub fn open(
+        data_dir: String,
+        secrets: Arc<dyn SecretStore>,
+        platform: Option<Arc<dyn PlatformKeys>>,
+        agent_socket: Option<String>,
+    ) -> Result<Arc<Self>, CoreError> {
         let dir = PathBuf::from(data_dir);
         std::fs::create_dir_all(&dir).map_err(failed)?;
         let store = Store::open(dir.join("termiux.sqlite"))?;
@@ -358,8 +441,8 @@ impl TermiuxCore {
             core: Arc::new(Core {
                 store: Arc::new(store),
                 secrets: Arc::new(SecretStoreAdapter(secrets)),
-                platform: None,
-                agent_socket: None,
+                platform: platform.map(|p| Arc::new(PlatformAdapter(p)) as Arc<dyn termiux_session::PlatformSigner>),
+                agent_socket: agent_socket.filter(|s| !s.is_empty()).map(PathBuf::from),
             }),
         }))
     }
@@ -403,6 +486,7 @@ impl TermiuxCore {
                 }
                 host.auth = match other {
                     HostAuth::Key { key_id } => model::AuthMethod::Key { key_id: parse_id(&key_id)? },
+                    HostAuth::Agent => model::AuthMethod::Agent,
                     _ => model::AuthMethod::KeyboardInteractive,
                 };
                 self.core.store.save_host(&host)?;
@@ -435,6 +519,70 @@ impl TermiuxCore {
     ) -> Result<KeyRecord, CoreError> {
         let key = self.core.import_key(&label, &contents, passphrase.as_deref().filter(|p| !p.is_empty()))?;
         Ok(KeyRecord::from(&key))
+    }
+
+    pub fn generate_key(
+        &self,
+        label: String,
+        algorithm: KeyAlgorithm,
+        passphrase: Option<String>,
+    ) -> Result<KeyRecord, CoreError> {
+        use termiux_keys::KeyType;
+        let kind = match algorithm {
+            KeyAlgorithm::Ed25519 => KeyType::Ed25519,
+            KeyAlgorithm::EcdsaP256 => KeyType::EcdsaP256,
+            KeyAlgorithm::EcdsaP384 => KeyType::EcdsaP384,
+            KeyAlgorithm::Rsa3072 => KeyType::Rsa { bits: 3072 },
+            KeyAlgorithm::Rsa4096 => KeyType::Rsa { bits: 4096 },
+        };
+        let key = self.core.generate_key(&label, kind, passphrase.as_deref().filter(|p| !p.is_empty()))?;
+        Ok(KeyRecord::from(&key))
+    }
+
+    /// Creates an `sk-ssh-ed25519` key on the plugged-in security key. Blocks until the
+    /// key is touched; throws `PinRequired` when the key wants its PIN.
+    pub fn generate_security_key(&self, label: String, pin: Option<String>) -> Result<KeyRecord, CoreError> {
+        let key = self.core.generate_security_key(&label, pin.as_deref().filter(|p| !p.is_empty()))?;
+        Ok(KeyRecord::from(&key))
+    }
+
+    /// Registers a hardware-bound key (created or found by the app) by its public key.
+    pub fn add_platform_key(
+        &self,
+        label: String,
+        public_key: String,
+        key: PlatformKeyRef,
+    ) -> Result<KeyRecord, CoreError> {
+        let storage = match key {
+            PlatformKeyRef::Piv { token_id, slot } => model::KeyStorage::Piv { token_id, slot },
+            PlatformKeyRef::SecureEnclave { tag } => model::KeyStorage::SecureEnclave { tag },
+        };
+        Ok(KeyRecord::from(&self.core.add_platform_key(&label, &public_key, storage)?))
+    }
+
+    /// The OpenSSH private key file, optionally encrypted with `passphrase`.
+    pub fn export_private_key(&self, id: String, passphrase: Option<String>) -> Result<String, CoreError> {
+        Ok(self.core.export_private_key(parse_id(&id)?, passphrase.as_deref().filter(|p| !p.is_empty()))?)
+    }
+
+    /// Logs in to the host with its saved credentials and adds the key to authorized_keys.
+    pub async fn install_public_key(
+        &self,
+        host_id: String,
+        key_id: String,
+        ui: Arc<dyn Interaction>,
+    ) -> Result<(), CoreError> {
+        let host = self.core.store.host(parse_id(&host_id)?)?.ok_or_else(|| failed("host not found"))?;
+        let key_id = parse_id(&key_id)?;
+        let core = self.core.clone();
+        let port = host.port;
+        runtime()
+            .spawn(async move {
+                let ui: Arc<dyn termiux_session::Interaction> = Arc::new(InteractionAdapter(ui));
+                core.install_public_key(host, key_id, ui).await.map_err(|e| CoreError::from_session(e, port))
+            })
+            .await
+            .map_err(failed)?
     }
 
     pub fn delete_key(&self, id: String) -> Result<(), CoreError> {
@@ -575,7 +723,7 @@ mod tests {
     fn save_host_manages_password_secret() {
         let dir = tempfile::tempdir().unwrap();
         let secrets = Arc::new(Secrets::default());
-        let core = TermiuxCore::open(dir.path().to_string_lossy().into(), secrets.clone()).unwrap();
+        let core = TermiuxCore::open(dir.path().to_string_lossy().into(), secrets.clone(), None, None).unwrap();
 
         let saved = core
             .save_host(record(HostAuth::Password { saved: false }), PasswordChange::Set { password: "pw".into() })

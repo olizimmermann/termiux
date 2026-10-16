@@ -2442,6 +2442,8 @@ name = "termiux-ffi"
 version = "0.1.0"
 dependencies = [
  "tempfile",
+ "termiux-fido",
+ "termiux-keys",
  "termiux-model",
  "termiux-pty",
  "termiux-session",
