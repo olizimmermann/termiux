@@ -11,6 +11,7 @@ termiux-ssh.workspace = true
 termiux-pty.workspace = true
 termiux-fido.workspace = true
 termiux-keys.workspace = true
+termiux-sftp.workspace = true
 russh.workspace = true
 tokio.workspace = true
 thiserror.workspace = true

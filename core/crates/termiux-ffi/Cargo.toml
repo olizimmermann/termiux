@@ -20,6 +20,7 @@ termiux-session.workspace = true
 termiux-pty.workspace = true
 termiux-theme.workspace = true
 termiux-keys.workspace = true
+termiux-sftp.workspace = true
 termiux-fido.workspace = true
 uuid.workspace = true
 tokio.workspace = true

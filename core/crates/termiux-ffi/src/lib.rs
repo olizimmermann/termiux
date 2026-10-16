@@ -729,6 +729,23 @@ impl TermiuxCore {
             .map_err(failed)?
     }
 
+    /// Opens a file browser on a saved host over its own connection.
+    pub async fn open_sftp(&self, host_id: String, ui: Arc<dyn Interaction>) -> Result<Arc<FileBrowser>, CoreError> {
+        let host = self.core.store.host(parse_id(&host_id)?)?.ok_or_else(|| failed("host not found"))?;
+        let core = self.core.clone();
+        let port = host.port;
+        runtime()
+            .spawn(async move {
+                let ui: Arc<dyn termiux_session::Interaction> = Arc::new(InteractionAdapter(ui));
+                core.open_sftp(host, ui)
+                    .await
+                    .map(|b| Arc::new(FileBrowser { inner: Arc::new(b) }))
+                    .map_err(|e| CoreError::from_session(e, port))
+            })
+            .await
+            .map_err(failed)?
+    }
+
     /// Starts the user's login shell. Not available in sandboxed builds.
     pub fn open_local_shell(
         &self,
@@ -775,6 +792,11 @@ impl TerminalSession {
                 error: f.error.clone(),
             })
             .collect()
+    }
+
+    /// Opens a file browser on this session's connection (SSH sessions only).
+    pub async fn open_sftp(&self) -> Result<Arc<FileBrowser>, CoreError> {
+        Ok(Arc::new(FileBrowser { inner: Arc::new(self.inner.open_sftp().await?) }))
     }
 
     pub async fn start_forward(&self, id: String) -> Result<(), CoreError> {
@@ -870,5 +892,150 @@ mod tests {
 
         core.delete_host(saved.id).unwrap();
         assert!(core.hosts().unwrap().is_empty());
+    }
+}
+
+// MARK: SFTP
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct RemoteEntry {
+    pub name: String,
+    pub path: String,
+    pub is_dir: bool,
+    pub is_symlink: bool,
+    pub size: u64,
+    /// Seconds since the Unix epoch.
+    pub modified: Option<u32>,
+    pub permissions: Option<u32>,
+}
+
+impl From<termiux_sftp::Entry> for RemoteEntry {
+    fn from(e: termiux_sftp::Entry) -> Self {
+        Self {
+            name: e.name,
+            path: e.path,
+            is_dir: e.kind == termiux_sftp::EntryKind::Dir,
+            is_symlink: e.kind == termiux_sftp::EntryKind::Symlink,
+            size: e.size,
+            modified: e.modified,
+            permissions: e.permissions,
+        }
+    }
+}
+
+/// Progress of a background transfer. Called on core threads; `on_finished` exactly once.
+#[uniffi::export(with_foreign)]
+pub trait TransferListener: Send + Sync {
+    fn on_progress(&self, done: u64, total: u64);
+    /// `error` is `None` on success and "cancelled" when cancelled.
+    fn on_finished(&self, error: Option<String>);
+}
+
+/// A running upload or download.
+#[derive(uniffi::Object)]
+pub struct Transfer {
+    cancel: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[uniffi::export]
+impl Transfer {
+    pub fn cancel(&self) {
+        self.cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[derive(uniffi::Object)]
+pub struct FileBrowser {
+    inner: Arc<termiux_session::SftpBrowser>,
+}
+
+fn sftp_err(e: termiux_sftp::SftpError) -> CoreError {
+    failed(e)
+}
+
+impl FileBrowser {
+    fn transfer(
+        &self,
+        listener: Arc<dyn TransferListener>,
+        job: impl for<'a> FnOnce(
+            Arc<termiux_session::SftpBrowser>,
+            termiux_sftp::Progress<'a>,
+        ) -> std::pin::Pin<
+            Box<dyn Future<Output = Result<u64, termiux_sftp::SftpError>> + Send + 'a>,
+        > + Send
+        + 'static,
+    ) -> Arc<Transfer> {
+        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (browser, flag) = (self.inner.clone(), cancel.clone());
+        runtime().spawn(async move {
+            // At most ~10 progress callbacks per second, plus the final one.
+            let last = std::sync::Mutex::new(std::time::Instant::now() - std::time::Duration::from_secs(1));
+            let report = |done: u64, total: u64| {
+                let mut last = last.lock().unwrap_or_else(|e| e.into_inner());
+                if done == total || last.elapsed() >= std::time::Duration::from_millis(100) {
+                    *last = std::time::Instant::now();
+                    listener.on_progress(done, total);
+                }
+            };
+            let result = job(browser, termiux_sftp::Progress { report: &report, cancel: &flag }).await;
+            listener.on_finished(result.err().map(|e| e.to_string()));
+        });
+        Arc::new(Transfer { cancel })
+    }
+}
+
+#[uniffi::export(async_runtime = "tokio")]
+impl FileBrowser {
+    pub async fn home(&self) -> Result<String, CoreError> {
+        self.inner.sftp.home().await.map_err(sftp_err)
+    }
+
+    pub async fn list(&self, path: String) -> Result<Vec<RemoteEntry>, CoreError> {
+        Ok(self.inner.sftp.list(&path).await.map_err(sftp_err)?.into_iter().map(RemoteEntry::from).collect())
+    }
+
+    pub async fn mkdir(&self, path: String) -> Result<(), CoreError> {
+        self.inner.sftp.mkdir(&path).await.map_err(sftp_err)
+    }
+
+    pub async fn rename(&self, from: String, to: String) -> Result<(), CoreError> {
+        self.inner.sftp.rename(&from, &to).await.map_err(sftp_err)
+    }
+
+    /// Deletes a file or a whole directory tree.
+    pub async fn remove(&self, path: String) -> Result<(), CoreError> {
+        self.inner.sftp.remove(&path).await.map_err(sftp_err)
+    }
+
+    /// Downloads a file or folder to `local_path` in the background.
+    pub fn download(
+        &self,
+        remote_path: String,
+        local_path: String,
+        listener: Arc<dyn TransferListener>,
+    ) -> Arc<Transfer> {
+        self.transfer(listener, move |browser, progress| {
+            Box::pin(
+                async move { browser.sftp.download(&remote_path, std::path::Path::new(&local_path), &progress).await },
+            )
+        })
+    }
+
+    /// Uploads a local file or folder to `remote_path` in the background.
+    pub fn upload(
+        &self,
+        local_path: String,
+        remote_path: String,
+        listener: Arc<dyn TransferListener>,
+    ) -> Arc<Transfer> {
+        self.transfer(listener, move |browser, progress| {
+            Box::pin(
+                async move { browser.sftp.upload(std::path::Path::new(&local_path), &remote_path, &progress).await },
+            )
+        })
+    }
+
+    pub async fn close(&self) {
+        self.inner.close().await;
     }
 }

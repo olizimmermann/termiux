@@ -414,6 +414,13 @@ impl SshSession {
         Ok((status, output))
     }
 
+    /// Opens the "sftp" subsystem; the returned stream speaks the SFTP protocol.
+    pub async fn open_sftp_stream(&self) -> Result<russh::ChannelStream<client::Msg>, SshError> {
+        let channel = self.handle.channel_open_session().await?;
+        channel.request_subsystem(true, "sftp").await?;
+        Ok(channel.into_stream())
+    }
+
     /// The jump host session, if this one is tunnelled.
     pub fn via(&self) -> Option<&Arc<SshSession>> {
         self.via.as_ref()

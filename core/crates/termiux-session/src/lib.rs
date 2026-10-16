@@ -47,6 +47,8 @@ pub enum SessionError {
     MissingJumpHost(Uuid),
     #[error("jump hosts form a loop")]
     JumpLoop,
+    #[error(transparent)]
+    Sftp(#[from] termiux_sftp::SftpError),
 }
 
 /// Everything the core may need to ask the user while connecting. All methods may block
@@ -393,6 +395,12 @@ impl Core {
         Ok(terminal)
     }
 
+    /// Opens a file browser on `host` over its own SSH connection (with jump hosts).
+    pub async fn open_sftp(&self, host: Host, ui: Arc<dyn Interaction>) -> Result<SftpBrowser, SessionError> {
+        let session = Arc::new(self.connect_session(&host, ui).await?);
+        SftpBrowser::open(session).await
+    }
+
     /// Starts a local shell (not available in sandboxed builds).
     pub fn open_local_shell(
         &self,
@@ -411,6 +419,27 @@ impl Core {
             },
         )?;
         Ok(TerminalSession(Inner::Local { shell, killed }))
+    }
+}
+
+/// SFTP on an SSH connection; keeps the connection alive while in use.
+pub struct SftpBrowser {
+    pub sftp: termiux_sftp::Sftp,
+    session: Arc<SshSession>,
+    /// False when borrowing a terminal's connection, which must stay up on close.
+    owns_connection: bool,
+}
+
+impl SftpBrowser {
+    async fn open(session: Arc<SshSession>) -> Result<Self, SessionError> {
+        let stream = session.open_sftp_stream().await?;
+        Ok(Self { sftp: termiux_sftp::Sftp::new(stream).await?, session, owns_connection: true })
+    }
+
+    pub async fn close(&self) {
+        if self.owns_connection {
+            let _ = self.session.disconnect().await;
+        }
     }
 }
 
@@ -488,6 +517,18 @@ impl TerminalSession {
                 Err(e.into())
             }
         }
+    }
+
+    /// Opens SFTP on this session's connection (no new login or touch needed).
+    pub async fn open_sftp(&self) -> Result<SftpBrowser, SessionError> {
+        let Inner::Ssh { session, .. } = &self.0 else { return Err(SessionError::Unsupported("SFTP on local shells")) };
+        let stream = session.open_sftp_stream().await?;
+        // Shares the connection: closing the browser must not disconnect the terminal.
+        Ok(SftpBrowser {
+            sftp: termiux_sftp::Sftp::new(stream).await?,
+            session: session.clone(),
+            owns_connection: false,
+        })
     }
 
     pub async fn stop_forward(&self, id: Uuid) {
